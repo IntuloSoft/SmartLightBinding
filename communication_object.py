@@ -14,7 +14,6 @@ ValueT = TypeVar("ValueT")
 
 class Flags(IntFlag):
     """Bitmask representing the KNX communication object flags."""
-
     NONE = 0
     READ = auto()
     WRITE = auto()
@@ -317,6 +316,11 @@ class CommunicationObject(Generic[ValueT]):
         payload = getattr(telegram, "payload", None)
         if payload is None:
             return self.value
+
+        if isinstance(payload, GroupValueRead):
+            if from_bus and self.readable and self.xknx is not None and self.group_address is not None and self._value is not None:
+                self._send_raw(self.to_knx(self._value), response=True)
+            return self._value
 
         if isinstance(payload, (DPTArray, DPTBinary)):
             raw_payload = payload

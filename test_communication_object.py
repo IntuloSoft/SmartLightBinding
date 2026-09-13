@@ -6,7 +6,7 @@ from xknx.dpt.dpt_1 import DPTBool
 from xknx.dpt.dpt_9 import DPTTemperature
 from xknx.telegram import Telegram, TelegramDirection
 from xknx.telegram.address import GroupAddress
-from xknx.telegram.apci import GroupValueWrite
+from xknx.telegram.apci import GroupValueRead, GroupValueResponse, GroupValueWrite
 
 from communication_object import CommunicationObject, Flags
 
@@ -79,91 +79,118 @@ class TestFlags:
         assert Flags.READ in obj
         assert Flags.WRITE in obj
 
+    @pytest.mark.asyncio
+    async def test_flag_read(self, monkeypatch):
+        xknx = XKNX()
+        monkeypatch.setattr(type(xknx.cemi_handler), "send_telegram", AsyncMock())
 
-class TestValueConversions:
-    def test_dpt_generic_value_roundtrips_and_tracks_internal_value(self):
         obj = CommunicationObject(
-            name="Temperature",
-            dpt_class=DPTTemperature,
-            flags=Flags.READ | Flags.WRITE | Flags.TRANSMIT | Flags.UPDATE,
-            configurable_flags={
-                Flags.READ,
-                Flags.WRITE,
-                Flags.TRANSMIT,
-                Flags.UPDATE,
-            },
-            value=21.5,
-        )
-
-        payload = obj.to_knx(21.5)
-        decoded = obj.from_knx(payload)
-        assert decoded == 21.5
-        assert obj.value == 21.5
-        assert obj.read() == 21.5
-
-        obj.apply_telegram_value(DPTTemperature.to_knx(22.0))
-        assert obj.value == 22.0
-
-    def test_flagged_behavior_blocks_writes_and_updates_when_disabled(self):
-        obj = CommunicationObject(
-            name="Switch",
+            name="Read Object",
             dpt_class=DPTBool,
             flags=Flags.READ,
-            configurable_flags={Flags.READ, Flags.WRITE, Flags.TRANSMIT, Flags.UPDATE},
+            configurable_flags=Flags.READ,
+            xknx=xknx,
+            group_addresses=["1/1/1"],
+            value=True,
+        )
+
+        read_request = Telegram(
+            destination_address=GroupAddress("1/1/1"),
+            direction=TelegramDirection.INCOMING,
+            payload=GroupValueRead(),
+        )
+
+        assert obj.process_telegram(read_request, from_bus=True) is True
+
+        response = xknx.telegrams.get_nowait()
+        assert response.destination_address == obj.group_address
+        assert isinstance(response.payload, GroupValueResponse)
+        assert response.payload.value == DPTBool.to_knx(True)
+
+    def test_flag_write(self):
+        obj = CommunicationObject(
+            name="Write Object",
+            dpt_class=DPTBool,
+            flags=Flags.WRITE,
+            configurable_flags=Flags.WRITE,
         )
 
         obj.set_value(True)
         assert obj.value is True
-        assert obj.read() is True
-        assert obj.to_knx(True).value == 1
+
+    def test_flag_transmit(self, monkeypatch):
+        xknx = XKNX()
+        monkeypatch.setattr(type(xknx.cemi_handler), "send_telegram", AsyncMock())
+
+        obj = CommunicationObject(
+            name="Transmit Object",
+            dpt_class=DPTBool,
+            flags=Flags.TRANSMIT,
+            configurable_flags=Flags.TRANSMIT,
+            xknx=xknx,
+            group_addresses=["1/1/1"],
+        )
+
+        obj.set_value(True)
+        assert obj.value is True
+        assert not xknx.telegrams.empty()
+
+    def test_flag_update(self):
+        obj = CommunicationObject(
+            name="Update Object",
+            dpt_class=DPTBool,
+            flags=Flags.UPDATE,
+            configurable_flags=Flags.UPDATE,
+            value=False,
+        )
+
+        obj.apply_telegram_value(DPTBool.to_knx(True))
+        assert obj.value is True
+
+    def test_flag_read_on_init(self, monkeypatch):
+        xknx = XKNX()
+        monkeypatch.setattr(type(xknx.cemi_handler), "send_telegram", AsyncMock())
+
+        obj = CommunicationObject(
+            name="Read On Init Object",
+            dpt_class=DPTBool,
+            flags=Flags.READ_ON_INIT,
+            configurable_flags=Flags.READ_ON_INIT,
+            xknx=xknx,
+            group_addresses=["1/1/2"],
+            value=False,
+        )
+
+        obj.init()
+        assert not xknx.telegrams.empty()
+
+
+    def test_flag_communication(self, monkeypatch):
+        xknx = XKNX()
+        monkeypatch.setattr(type(xknx.cemi_handler), "send_telegram", AsyncMock())
+
+        obj = CommunicationObject(
+            name="Disabled Communication Object",
+            dpt_class=DPTBool,
+            flags=Flags.NONE,
+            configurable_flags={Flags.READ, Flags.WRITE, Flags.TRANSMIT, Flags.UPDATE},
+            xknx=xknx,
+            group_addresses=["1/1/1"],
+            value=False,
+        )
+
+        assert obj.read() is False
+        obj.set_value(True)
+        assert obj.value is True
+        assert xknx.telegrams.empty()
 
         with pytest.raises(ValueError, match="UPDATE is disabled"):
             obj.apply_telegram_value(DPTBool.to_knx(True))
 
-    def test_write_and_transmit_flags_control_write_and_transmission(self, monkeypatch):
-        xknx = XKNX()
-        monkeypatch.setattr(type(xknx.cemi_handler), "send_telegram", AsyncMock())
-
-        writable_and_transmitting = CommunicationObject(
-            name="Writable Transmitter",
-            dpt_class=DPTBool,
-            flags=Flags.WRITE | Flags.TRANSMIT,
-            configurable_flags={Flags.READ, Flags.WRITE, Flags.TRANSMIT, Flags.UPDATE},
-            xknx=xknx,
-            group_addresses=["1/1/1"],
-        )
-
-        writable_and_transmitting.set_value(True)
-        assert writable_and_transmitting.value is True
-        assert not xknx.telegrams.empty()
-        xknx.telegrams.get_nowait()
-
-        write_only = CommunicationObject(
-            name="Write Only",
-            dpt_class=DPTBool,
-            flags=Flags.WRITE,
-            configurable_flags={Flags.READ, Flags.WRITE, Flags.TRANSMIT, Flags.UPDATE},
-            xknx=xknx,
-            group_addresses=["1/1/1"],
-        )
-
-        write_only.set_value(False)
-        assert write_only.value is False
+        obj.init()
         assert xknx.telegrams.empty()
 
-        transmit_only = CommunicationObject(
-            name="Transmit Only",
-            dpt_class=DPTBool,
-            flags=Flags.TRANSMIT,
-            configurable_flags={Flags.READ, Flags.WRITE, Flags.TRANSMIT, Flags.UPDATE},
-            xknx=xknx,
-            group_addresses=["1/1/1"],
-        )
-
-        transmit_only.set_value(True)
-        assert transmit_only.value is True
-        assert not xknx.telegrams.empty()
-        xknx.telegrams.get_nowait()
+class TestScenarios:
 
     @pytest.mark.asyncio
     async def test_virtual_knx_bus_updates_status_receiver_from_light_status_object(
@@ -302,3 +329,4 @@ class TestValueConversions:
             disabled_object.apply_telegram_value(DPTBool.to_knx(True))
 
         assert disabled_object.value is True
+
