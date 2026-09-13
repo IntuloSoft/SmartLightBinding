@@ -112,19 +112,59 @@ class TestValueConversions:
             configurable_flags={Flags.READ, Flags.WRITE, Flags.TRANSMIT, Flags.UPDATE},
         )
 
-        with pytest.raises(ValueError, match="WRITE is disabled"):
-            obj.set_value(True)
+        obj.set_value(True)
+        assert obj.value is True
+        assert obj.read() is True
+        assert obj.to_knx(True).value == 1
 
         with pytest.raises(ValueError, match="UPDATE is disabled"):
             obj.apply_telegram_value(DPTBool.to_knx(True))
 
-        obj.set_flag(Flags.WRITE)
-        obj.set_value(True)
-        assert obj.value is True
-        assert obj.to_knx(True).value == 1
+    def test_write_and_transmit_flags_control_write_and_transmission(self, monkeypatch):
+        xknx = XKNX()
+        monkeypatch.setattr(type(xknx.cemi_handler), "send_telegram", AsyncMock())
 
+        writable_and_transmitting = CommunicationObject(
+            name="Writable Transmitter",
+            dpt_class=DPTBool,
+            flags=Flags.WRITE | Flags.TRANSMIT,
+            configurable_flags={Flags.READ, Flags.WRITE, Flags.TRANSMIT, Flags.UPDATE},
+            xknx=xknx,
+            group_addresses=["1/1/1"],
+        )
 
-class TestScenarios:
+        writable_and_transmitting.set_value(True)
+        assert writable_and_transmitting.value is True
+        assert not xknx.telegrams.empty()
+        xknx.telegrams.get_nowait()
+
+        write_only = CommunicationObject(
+            name="Write Only",
+            dpt_class=DPTBool,
+            flags=Flags.WRITE,
+            configurable_flags={Flags.READ, Flags.WRITE, Flags.TRANSMIT, Flags.UPDATE},
+            xknx=xknx,
+            group_addresses=["1/1/1"],
+        )
+
+        write_only.set_value(False)
+        assert write_only.value is False
+        assert xknx.telegrams.empty()
+
+        transmit_only = CommunicationObject(
+            name="Transmit Only",
+            dpt_class=DPTBool,
+            flags=Flags.TRANSMIT,
+            configurable_flags={Flags.READ, Flags.WRITE, Flags.TRANSMIT, Flags.UPDATE},
+            xknx=xknx,
+            group_addresses=["1/1/1"],
+        )
+
+        transmit_only.set_value(True)
+        assert transmit_only.value is True
+        assert not xknx.telegrams.empty()
+        xknx.telegrams.get_nowait()
+
     @pytest.mark.asyncio
     async def test_virtual_knx_bus_updates_status_receiver_from_light_status_object(
         self, monkeypatch
@@ -194,49 +234,6 @@ class TestScenarios:
         await xknx.telegram_queue._process_all_telegrams()
         assert status_object.value is True
 
-    def test_write_and_transmit_flags_control_write_and_transmission(self, monkeypatch):
-        xknx = XKNX()
-        monkeypatch.setattr(type(xknx.cemi_handler), "send_telegram", AsyncMock())
-
-        writable_and_transmitting = CommunicationObject(
-            name="Writable Transmitter",
-            dpt_class=DPTBool,
-            flags=Flags.WRITE | Flags.TRANSMIT,
-            configurable_flags={Flags.READ, Flags.WRITE, Flags.TRANSMIT, Flags.UPDATE},
-            xknx=xknx,
-            group_addresses=["1/1/1"],
-        )
-
-        writable_and_transmitting.set_value(True)
-        assert writable_and_transmitting.value is True
-        assert not xknx.telegrams.empty()
-        xknx.telegrams.get_nowait()
-
-        write_only = CommunicationObject(
-            name="Write Only",
-            dpt_class=DPTBool,
-            flags=Flags.WRITE,
-            configurable_flags={Flags.READ, Flags.WRITE, Flags.TRANSMIT, Flags.UPDATE},
-            xknx=xknx,
-            group_addresses=["1/1/1"],
-        )
-
-        write_only.set_value(False)
-        assert write_only.value is False
-        assert xknx.telegrams.empty()
-
-        transmit_only = CommunicationObject(
-            name="Transmit Only",
-            dpt_class=DPTBool,
-            flags=Flags.TRANSMIT,
-            configurable_flags={Flags.READ, Flags.WRITE, Flags.TRANSMIT, Flags.UPDATE},
-            xknx=xknx,
-            group_addresses=["1/1/1"],
-        )
-
-        with pytest.raises(ValueError, match="WRITE is disabled"):
-            transmit_only.set_value(True)
-
     @pytest.mark.asyncio
     async def test_single_object_with_switch_and_state_ga_updates_from_state_telegram(
         self, monkeypatch
@@ -274,3 +271,34 @@ class TestScenarios:
 
         assert light_object.value is False
         assert light_object.read() is False
+
+    def test_disabled_communication_object_does_not_participate_in_any_communication(
+        self, monkeypatch
+    ):
+        xknx = XKNX()
+        monkeypatch.setattr(type(xknx.cemi_handler), "send_telegram", AsyncMock())
+
+        disabled_object = CommunicationObject(
+            name="Disabled Object",
+            dpt_class=DPTBool,
+            flags=Flags.NONE,
+            configurable_flags={Flags.READ, Flags.WRITE, Flags.TRANSMIT, Flags.UPDATE},
+            xknx=xknx,
+            group_addresses=["1/1/1"],
+            value=False,
+        )
+
+        assert not disabled_object.readable
+        assert not disabled_object.writable
+        assert not disabled_object.updateable
+        assert not disabled_object.transmittable
+
+        disabled_object.set_value(True)
+        assert disabled_object.value is True
+        assert disabled_object.read() is True
+        assert xknx.telegrams.empty()
+
+        with pytest.raises(ValueError, match="UPDATE is disabled"):
+            disabled_object.apply_telegram_value(DPTBool.to_knx(True))
+
+        assert disabled_object.value is True

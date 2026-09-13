@@ -21,7 +21,6 @@ class Flags(IntFlag):
     TRANSMIT = auto()
     UPDATE = auto()
     READ_ON_INIT = auto()
-    WRITE_ON_INIT = auto()
 
 
 class CommunicationObject(Generic[ValueT]):
@@ -167,10 +166,6 @@ class CommunicationObject(Generic[ValueT]):
         return self.is_set(Flags.READ_ON_INIT)
 
     @property
-    def write_on_init(self) -> bool:
-        return self.is_set(Flags.WRITE_ON_INIT)
-
-    @property
     def value(self) -> ValueT | None:
         return self._value
 
@@ -229,14 +224,15 @@ class CommunicationObject(Generic[ValueT]):
                 raise ValueError(
                     f"Object '{self.name}' does not allow incoming updates because UPDATE is disabled."
                 )
-        elif not self.writable:
-            raise ValueError(
-                f"Object '{self.name}' does not allow application writes because WRITE is disabled."
-            )
 
         self._store_value(value)
 
-        if not from_bus and self.transmittable and self.xknx is not None and self.group_address is not None:
+        if (
+            not from_bus
+            and self.transmittable
+            and self.xknx is not None
+            and self.group_address is not None
+        ):
             self.transmit(value)
 
         return value
@@ -364,14 +360,9 @@ class CommunicationObject(Generic[ValueT]):
         return payload
 
     def init(self) -> None:
-        """Perform initialization actions based on flags: read_on_init / write_on_init."""
+        """Perform initialization actions based on flags: read_on_init."""
         if self.xknx is None:
             return
-        if self.write_on_init and self._value is not None:
-            try:
-                self.transmit(self._value)
-            except Exception:
-                pass
         if self.read_on_init and self.group_address is not None:
             telegram = Telegram(
                 destination_address=self.group_address,
@@ -382,8 +373,6 @@ class CommunicationObject(Generic[ValueT]):
             self.xknx.telegrams.put_nowait(telegram)
 
     def read(self) -> ValueT | None:
-        if not self.readable:
-            raise ValueError(f"Object '{self.name}' cannot be read because READ is disabled.")
         return self._value
 
     def __contains__(self, flag: Flags | int) -> bool:
