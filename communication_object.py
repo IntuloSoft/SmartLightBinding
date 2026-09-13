@@ -42,8 +42,7 @@ class CommunicationObject(Generic[ValueT]):
         default_flags: Flags | int | None = None,
         value: ValueT | None = None,
         xknx: XKNX | None = None,
-        group_address: object | None = None,
-        group_address_state: object | None = None,
+        group_addresses: object | list[object] | tuple[object, ...] | None = None,
         after_update_cb: callable | None = None,
     ) -> None:
         self.name = name
@@ -75,22 +74,7 @@ class CommunicationObject(Generic[ValueT]):
 
         # xknx integration
         self.xknx = xknx
-        self.passive_group_addresses: list[object] = []
-
-        def _unpack_group(address):
-            if address is None:
-                return None
-            if not isinstance(address, list):
-                return parse_device_group_address(address)
-            if not address:
-                return None
-            active = address[0]
-            passive = [parse_device_group_address(a) for a in address[1:] if a is not None]
-            self.passive_group_addresses.extend(passive)
-            return parse_device_group_address(active) if active is not None else None
-
-        self.group_address = _unpack_group(group_address)
-        self.group_address_state = _unpack_group(group_address_state)
+        self.group_addresses = self._normalize_group_addresses(group_addresses)
         self.after_update_cb = after_update_cb
         self._telegram_cb = None
 
@@ -269,23 +253,27 @@ class CommunicationObject(Generic[ValueT]):
         self._payload = payload
         return decoded
 
-    def group_addresses(self):
-        """Yield all configured group addresses for this communication object."""
-        if self.group_address is not None:
-            yield self.group_address
-        if self.group_address_state is not None:
-            yield self.group_address_state
-        yield from self.passive_group_addresses
+    @property
+    def group_address(self) -> object | None:
+        return self.group_addresses[0] if self.group_addresses else None
+
+    @group_address.setter
+    def group_address(self, value: object | None) -> None:
+        if value is None:
+            self.group_addresses = []
+            return
+        self.group_addresses = [parse_device_group_address(value)]
 
     def register(self) -> None:
         """Register telegram callback with XKNX if configured."""
         if self.xknx is None:
             return
-        if not (self.group_address or self.group_address_state or self.passive_group_addresses):
+        if not self.group_addresses:
             return
-        group_list = [addr for addr in self.group_addresses()]
         self._telegram_cb = self.xknx.telegram_queue.register_telegram_received_cb(
-            self._on_telegram, group_addresses=group_list, match_for_outgoing=True
+            self._on_telegram,
+            group_addresses=self.group_addresses,
+            match_for_outgoing=True,
         )
 
     def unregister(self) -> None:
@@ -384,9 +372,9 @@ class CommunicationObject(Generic[ValueT]):
                 self.transmit(self._value)
             except Exception:
                 pass
-        if self.read_on_init and self.group_address_state is not None:
+        if self.read_on_init and self.group_address is not None:
             telegram = Telegram(
-                destination_address=self.group_address_state,
+                destination_address=self.group_address,
                 payload=GroupValueRead(),
                 source_address=self.xknx.current_address,
                 direction=TelegramDirection.OUTGOING,
@@ -416,6 +404,29 @@ class CommunicationObject(Generic[ValueT]):
         return tuple(
             flag for flag in Flags if flag != Flags.NONE and bool(mask & flag)
         )
+
+    @staticmethod
+    def _normalize_group_addresses(
+        group_addresses: object | list[object] | tuple[object, ...] | None,
+        group_address: object | None = None,
+    ) -> list[object]:
+        values: list[object] = []
+
+        if group_addresses is not None:
+            if isinstance(group_addresses, (list, tuple, set)):
+                values.extend(group_addresses)
+            else:
+                values.append(group_addresses)
+
+        if group_address is not None:
+            values.append(group_address)
+
+        normalized: list[object] = []
+        for item in values:
+            if item is None:
+                continue
+            normalized.append(parse_device_group_address(item))
+        return normalized
 
 
 __all__ = ["Flags", "CommunicationObject"]
