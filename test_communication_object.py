@@ -1,5 +1,7 @@
 import pytest
+from unittest.mock import AsyncMock
 
+from xknx import XKNX
 from xknx.dpt.dpt_1 import DPTBool
 from xknx.dpt.dpt_9 import DPTTemperature
 
@@ -120,3 +122,41 @@ def test_flagged_behavior_blocks_writes_and_updates_when_disabled():
     obj.set_value(True)
     assert obj.value is True
     assert obj.to_knx(True).value == 1
+
+
+@pytest.mark.asyncio
+async def test_virtual_knx_bus_updates_status_receiver_from_light_status_object(monkeypatch):
+    xknx = XKNX()
+    monkeypatch.setattr(type(xknx.cemi_handler), "send_telegram", AsyncMock())
+
+    # Object representing the actual light-state communication object on the KNX bus.
+    light_status = CommunicationObject(
+        name="Light Status",
+        dpt_class=DPTBool,
+        flags=Flags.READ | Flags.WRITE | Flags.TRANSMIT | Flags.UPDATE,
+        configurable_flags=Flags.READ | Flags.WRITE | Flags.TRANSMIT | Flags.UPDATE,
+        xknx=xknx,
+        group_address="1/1/1",
+        value=False,
+    )
+
+    # Object listening to the same status GA and updating itself via the registered xknx bus.
+    status_receiver = CommunicationObject(
+        name="Light Status Receiver",
+        dpt_class=DPTBool,
+        flags=Flags.READ | Flags.UPDATE,
+        configurable_flags=Flags.READ | Flags.WRITE | Flags.TRANSMIT | Flags.UPDATE,
+        xknx=xknx,
+        group_address="1/1/1",
+        value=False,
+    )
+
+    light_status.register()
+    status_receiver.register()
+
+    light_status.set_value(True)
+    await xknx.telegram_queue._process_all_telegrams()
+
+    assert light_status.value is True
+    assert status_receiver.value is True
+    assert status_receiver.read() is True

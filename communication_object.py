@@ -3,6 +3,7 @@ from __future__ import annotations
 from enum import IntFlag, auto
 from typing import Any, Generic, Iterable, TypeVar, cast
 
+from xknx import XKNX
 from xknx.dpt import DPTArray, DPTBase, DPTBinary
 from xknx.telegram import Telegram, TelegramDirection
 from xknx.telegram.apci import GroupValueWrite, GroupValueResponse, GroupValueRead
@@ -40,7 +41,7 @@ class CommunicationObject(Generic[ValueT]):
         configurable_flags: Flags | int | Iterable[Flags | int] | None = None,
         default_flags: Flags | int | None = None,
         value: ValueT | None = None,
-        xknx: "XKNX" | None = None,
+        xknx: XKNX | None = None,
         group_address: object | None = None,
         group_address_state: object | None = None,
         after_update_cb: callable | None = None,
@@ -249,13 +250,11 @@ class CommunicationObject(Generic[ValueT]):
                 f"Object '{self.name}' does not allow application writes because WRITE is disabled."
             )
 
-        self.value = value
-        # notify application callback
-        if self.after_update_cb is not None:
-            try:
-                self.after_update_cb(value)
-            except Exception:
-                pass
+        self._store_value(value)
+
+        if not from_bus and self.transmittable and self.xknx is not None and self.group_address is not None:
+            self.transmit(value)
+
         return value
 
     def apply_telegram_value(
@@ -266,13 +265,8 @@ class CommunicationObject(Generic[ValueT]):
                 f"Object '{self.name}' does not accept new values because UPDATE is disabled."
             )
         decoded = self.from_knx(payload)
+        self._store_value(decoded)
         self._payload = payload
-        self._value = decoded
-        if self.after_update_cb is not None:
-            try:
-                self.after_update_cb(decoded)
-            except Exception:
-                pass
         return decoded
 
     def group_addresses(self):
@@ -308,12 +302,16 @@ class CommunicationObject(Generic[ValueT]):
         """Internal telegram callback from xknx TelegramQueue."""
         from_bus = telegram.direction == TelegramDirection.INCOMING
         try:
-            self.process_telegram(telegram, from_bus=from_bus)
+            self._process_telegram(telegram, from_bus=from_bus)
         except Exception:
             # swallow errors to avoid breaking telegram processing
             pass
 
     def send_raw(self, payload: DPTArray | DPTBinary, response: bool = False) -> None:
+        """Send payload as telegram to KNX bus using the configured XKNX instance."""
+        self._send_raw(payload, response=response)
+
+    def _send_raw(self, payload: DPTArray | DPTBinary, response: bool = False) -> None:
         """Send payload as telegram to KNX bus using the configured XKNX instance."""
         if self.xknx is None:
             raise RuntimeError("No xknx instance configured for CommunicationObject")
@@ -328,6 +326,10 @@ class CommunicationObject(Generic[ValueT]):
         self.xknx.telegrams.put_nowait(telegram)
 
     def process_telegram(self, telegram: Any, *, from_bus: bool = True) -> ValueT | None:
+        """Public entry point for processing telegrams from the KNX bus."""
+        return self._process_telegram(telegram, from_bus=from_bus)
+
+    def _process_telegram(self, telegram: Any, *, from_bus: bool = True) -> ValueT | None:
         payload = getattr(telegram, "payload", None)
         if payload is None:
             return self.value
@@ -349,6 +351,15 @@ class CommunicationObject(Generic[ValueT]):
 
         return self.apply_telegram_value(raw_payload, from_bus=from_bus)
 
+    def _store_value(self, value: ValueT) -> ValueT:
+        self.value = value
+        if self.after_update_cb is not None:
+            try:
+                self.after_update_cb(value)
+            except Exception:
+                pass
+        return value
+
     def transmit(self, value: ValueT | None = None) -> DPTArray | DPTBinary:
         if not self.transmittable:
             raise ValueError(
@@ -360,22 +371,19 @@ class CommunicationObject(Generic[ValueT]):
         payload = self.to_knx(current_value)
         self._payload = payload
         self._value = current_value
-        # if xknx configured, send a telegram
         if self.xknx is not None and self.group_address is not None:
-            self.send_raw(payload)
+            self._send_raw(payload)
         return payload
 
     def init(self) -> None:
         """Perform initialization actions based on flags: read_on_init / write_on_init."""
         if self.xknx is None:
             return
-        # write on init: transmit current value to bus
         if self.write_on_init and self._value is not None:
             try:
                 self.transmit(self._value)
             except Exception:
                 pass
-        # read on init: request state from bus
         if self.read_on_init and self.group_address_state is not None:
             telegram = Telegram(
                 destination_address=self.group_address_state,
