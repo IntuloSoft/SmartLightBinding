@@ -15,6 +15,7 @@ ValueT = TypeVar("ValueT")
 class Flags(IntFlag):
     """Bitmask representing the KNX communication object flags."""
     NONE = 0
+    COMMUNICATION = auto()
     READ = auto()
     WRITE = auto()
     TRANSMIT = auto()
@@ -318,7 +319,7 @@ class CommunicationObject(Generic[ValueT]):
             return self.value
 
         if isinstance(payload, GroupValueRead):
-            if from_bus and self.readable and self.xknx is not None and self.group_address is not None and self._value is not None:
+            if from_bus and self.is_set(Flags.COMMUNICATION) and self.readable and self.xknx is not None and self.group_address is not None and self._value is not None:
                 self._send_raw(self.to_knx(self._value), response=True)
             return self._value
 

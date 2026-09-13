@@ -88,7 +88,31 @@ class TestFlags:
             name="Read Object",
             dpt_class=DPTBool,
             flags=Flags.READ,
-            configurable_flags=Flags.READ,
+            configurable_flags=Flags.READ | Flags.COMMUNICATION,
+            xknx=xknx,
+            group_addresses=["1/1/1"],
+            value=True,
+        )
+
+        read_request = Telegram(
+            destination_address=GroupAddress("1/1/1"),
+            direction=TelegramDirection.INCOMING,
+            payload=GroupValueRead(),
+        )
+
+        assert obj.process_telegram(read_request, from_bus=True) is True
+        assert xknx.telegrams.empty()
+
+    @pytest.mark.asyncio
+    async def test_flag_read_with_communication(self, monkeypatch):
+        xknx = XKNX()
+        monkeypatch.setattr(type(xknx.cemi_handler), "send_telegram", AsyncMock())
+
+        obj = CommunicationObject(
+            name="Read Object",
+            dpt_class=DPTBool,
+            flags=Flags.READ | Flags.COMMUNICATION,
+            configurable_flags=Flags.READ | Flags.COMMUNICATION,
             xknx=xknx,
             group_addresses=["1/1/1"],
             value=True,
@@ -106,6 +130,31 @@ class TestFlags:
         assert response.destination_address == obj.group_address
         assert isinstance(response.payload, GroupValueResponse)
         assert response.payload.value == DPTBool.to_knx(True)
+
+    def test_flag_communication(self, monkeypatch):
+        xknx = XKNX()
+        monkeypatch.setattr(type(xknx.cemi_handler), "send_telegram", AsyncMock())
+
+        obj = CommunicationObject(
+            name="Disabled Communication Object",
+            dpt_class=DPTBool,
+            flags=Flags.NONE,
+            configurable_flags={Flags.READ, Flags.WRITE, Flags.TRANSMIT, Flags.UPDATE, Flags.COMMUNICATION},
+            xknx=xknx,
+            group_addresses=["1/1/1"],
+            value=True,
+        )
+
+        obj.set_value(False)
+        assert obj.value is False
+        assert obj.read() is False
+        assert xknx.telegrams.empty()
+
+        with pytest.raises(ValueError, match="UPDATE is disabled"):
+            obj.apply_telegram_value(DPTBool.to_knx(True))
+
+        obj.init()
+        assert xknx.telegrams.empty()
 
     def test_flag_write(self):
         obj = CommunicationObject(
@@ -126,7 +175,7 @@ class TestFlags:
             name="Transmit Object",
             dpt_class=DPTBool,
             flags=Flags.TRANSMIT,
-            configurable_flags=Flags.TRANSMIT,
+            configurable_flags={Flags.TRANSMIT, Flags.COMMUNICATION},
             xknx=xknx,
             group_addresses=["1/1/1"],
         )
@@ -155,7 +204,7 @@ class TestFlags:
             name="Read On Init Object",
             dpt_class=DPTBool,
             flags=Flags.READ_ON_INIT,
-            configurable_flags=Flags.READ_ON_INIT,
+            configurable_flags={Flags.READ_ON_INIT, Flags.COMMUNICATION},
             xknx=xknx,
             group_addresses=["1/1/2"],
             value=False,
