@@ -4,6 +4,9 @@ from enum import IntFlag, auto
 from typing import Any, Generic, Iterable, TypeVar, cast
 
 from xknx.dpt import DPTArray, DPTBase, DPTBinary
+from xknx.telegram import Telegram, TelegramDirection
+from xknx.telegram.apci import GroupValueWrite, GroupValueResponse, GroupValueRead
+from xknx.telegram.address import parse_device_group_address
 
 ValueT = TypeVar("ValueT")
 
@@ -37,6 +40,10 @@ class CommunicationObject(Generic[ValueT]):
         configurable_flags: Flags | int | Iterable[Flags | int] | None = None,
         default_flags: Flags | int | None = None,
         value: ValueT | None = None,
+        xknx: "XKNX" | None = None,
+        group_address: object | None = None,
+        group_address_state: object | None = None,
+        after_update_cb: callable | None = None,
     ) -> None:
         self.name = name
         self._configurable_flags = self._coerce_flag_set(
@@ -64,6 +71,27 @@ class CommunicationObject(Generic[ValueT]):
         self.dpt_class = self._resolve_dpt_class(dpt_class)
         self._payload: DPTArray | DPTBinary | None = None
         self._value: ValueT | None = None
+
+        # xknx integration
+        self.xknx = xknx
+        self.passive_group_addresses: list[object] = []
+
+        def _unpack_group(address):
+            if address is None:
+                return None
+            if not isinstance(address, list):
+                return parse_device_group_address(address)
+            if not address:
+                return None
+            active = address[0]
+            passive = [parse_device_group_address(a) for a in address[1:] if a is not None]
+            self.passive_group_addresses.extend(passive)
+            return parse_device_group_address(active) if active is not None else None
+
+        self.group_address = _unpack_group(group_address)
+        self.group_address_state = _unpack_group(group_address_state)
+        self.after_update_cb = after_update_cb
+        self._telegram_cb = None
 
         if value is not None:
             self.value = value
@@ -222,6 +250,12 @@ class CommunicationObject(Generic[ValueT]):
             )
 
         self.value = value
+        # notify application callback
+        if self.after_update_cb is not None:
+            try:
+                self.after_update_cb(value)
+            except Exception:
+                pass
         return value
 
     def apply_telegram_value(
@@ -234,7 +268,64 @@ class CommunicationObject(Generic[ValueT]):
         decoded = self.from_knx(payload)
         self._payload = payload
         self._value = decoded
+        if self.after_update_cb is not None:
+            try:
+                self.after_update_cb(decoded)
+            except Exception:
+                pass
         return decoded
+
+    def group_addresses(self):
+        """Yield all configured group addresses for this communication object."""
+        if self.group_address is not None:
+            yield self.group_address
+        if self.group_address_state is not None:
+            yield self.group_address_state
+        yield from self.passive_group_addresses
+
+    def register(self) -> None:
+        """Register telegram callback with XKNX if configured."""
+        if self.xknx is None:
+            return
+        if not (self.group_address or self.group_address_state or self.passive_group_addresses):
+            return
+        group_list = [addr for addr in self.group_addresses()]
+        self._telegram_cb = self.xknx.telegram_queue.register_telegram_received_cb(
+            self._on_telegram, group_addresses=group_list, match_for_outgoing=True
+        )
+
+    def unregister(self) -> None:
+        """Unregister telegram callback."""
+        if self.xknx is None or self._telegram_cb is None:
+            return
+        try:
+            self.xknx.telegram_queue.unregister_telegram_received_cb(self._telegram_cb)
+        except Exception:
+            pass
+        self._telegram_cb = None
+
+    def _on_telegram(self, telegram: Telegram) -> None:
+        """Internal telegram callback from xknx TelegramQueue."""
+        from_bus = telegram.direction == TelegramDirection.INCOMING
+        try:
+            self.process_telegram(telegram, from_bus=from_bus)
+        except Exception:
+            # swallow errors to avoid breaking telegram processing
+            pass
+
+    def send_raw(self, payload: DPTArray | DPTBinary, response: bool = False) -> None:
+        """Send payload as telegram to KNX bus using the configured XKNX instance."""
+        if self.xknx is None:
+            raise RuntimeError("No xknx instance configured for CommunicationObject")
+        if self.group_address is None:
+            raise RuntimeError("No group_address configured for CommunicationObject")
+        telegram = Telegram(
+            destination_address=self.group_address,
+            payload=(GroupValueResponse(payload) if response else GroupValueWrite(payload)),
+            source_address=self.xknx.current_address,
+            direction=TelegramDirection.OUTGOING,
+        )
+        self.xknx.telegrams.put_nowait(telegram)
 
     def process_telegram(self, telegram: Any, *, from_bus: bool = True) -> ValueT | None:
         payload = getattr(telegram, "payload", None)
@@ -269,7 +360,30 @@ class CommunicationObject(Generic[ValueT]):
         payload = self.to_knx(current_value)
         self._payload = payload
         self._value = current_value
+        # if xknx configured, send a telegram
+        if self.xknx is not None and self.group_address is not None:
+            self.send_raw(payload)
         return payload
+
+    def init(self) -> None:
+        """Perform initialization actions based on flags: read_on_init / write_on_init."""
+        if self.xknx is None:
+            return
+        # write on init: transmit current value to bus
+        if self.write_on_init and self._value is not None:
+            try:
+                self.transmit(self._value)
+            except Exception:
+                pass
+        # read on init: request state from bus
+        if self.read_on_init and self.group_address_state is not None:
+            telegram = Telegram(
+                destination_address=self.group_address_state,
+                payload=GroupValueRead(),
+                source_address=self.xknx.current_address,
+                direction=TelegramDirection.OUTGOING,
+            )
+            self.xknx.telegrams.put_nowait(telegram)
 
     def read(self) -> ValueT | None:
         if not self.readable:

@@ -10,7 +10,7 @@ def test_default_flags_are_applied_and_exposed():
     obj = CommunicationObject(
         name="Switch Object",
         flags=Flags.READ,
-        configurable_flags={Flags.READ, Flags.WRITE, Flags.TRANSMIT},
+        configurable_flags=Flags.READ | Flags.WRITE | Flags.TRANSMIT,
         default_flags=Flags.READ | Flags.WRITE,
     )
 
@@ -23,7 +23,7 @@ def test_only_configurable_flags_can_be_changed():
     obj = CommunicationObject(
         name="Light Object",
         flags=Flags.READ,
-        configurable_flags={Flags.READ, Flags.WRITE, Flags.TRANSMIT},
+        configurable_flags=Flags.READ | Flags.WRITE | Flags.TRANSMIT,
     )
 
     obj.set_flag(Flags.WRITE)
@@ -40,7 +40,7 @@ def test_reset_restores_default_flags():
     obj = CommunicationObject(
         name="Temperature Object",
         flags=Flags.NONE,
-        configurable_flags={Flags.READ, Flags.WRITE, Flags.UPDATE},
+        configurable_flags=Flags.READ | Flags.WRITE | Flags.UPDATE,
         default_flags=Flags.READ | Flags.UPDATE,
     )
 
@@ -54,7 +54,7 @@ def test_update_flags_supports_batch_changes():
     obj = CommunicationObject(
         name="Dimmable Object",
         flags=Flags.NONE,
-        configurable_flags={Flags.READ, Flags.WRITE, Flags.TRANSMIT, Flags.UPDATE},
+        configurable_flags=Flags.READ | Flags.WRITE | Flags.TRANSMIT | Flags.UPDATE,
         default_flags=Flags.READ,
     )
 
