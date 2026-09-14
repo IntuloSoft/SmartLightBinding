@@ -1,8 +1,6 @@
 import copy
 from unittest.mock import AsyncMock
-
 import pytest
-
 from xknx import XKNX
 from xknx.telegram import Telegram
 from xknx.telegram.address import GroupAddress
@@ -36,13 +34,13 @@ async def test_outgoing_plus_echo(monkeypatch):
 
     xknx.telegram_queue.register_telegram_received_cb(
         on_telegram,
-        group_addresses=["1/1/1"],
+        group_addresses=[GroupAddress("1/1/1")],
         match_for_outgoing=True,
     )
 
     xknx.telegrams.put_nowait(
         Telegram(
-            destination_address="1/1/1",
+            destination_address=GroupAddress("1/1/1"),
             direction=TelegramDirection.INCOMING,
             payload=GroupValueWrite(b"\x01"),
         )
@@ -57,7 +55,7 @@ async def test_outgoing_plus_echo(monkeypatch):
 
     xknx.telegrams.put_nowait(
         Telegram(
-            destination_address=ga,
+            destination_address=GroupAddress("1/1/1"),
             direction=TelegramDirection.OUTGOING,
             payload=GroupValueWrite(b"\x01"),
         )
@@ -71,4 +69,3 @@ async def test_outgoing_plus_echo(monkeypatch):
         (TelegramDirection.OUTGOING, "1/1/1"),
         (TelegramDirection.INCOMING, "1/1/1"),
     ]
-

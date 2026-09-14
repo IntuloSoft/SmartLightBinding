@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from enum import IntFlag, auto
 from typing import Any, Generic, Iterable, TypeVar, cast
+from time import monotonic
 
 from xknx import XKNX
 from xknx.dpt import DPTArray, DPTBase, DPTBinary
-from xknx.telegram import Telegram, TelegramDirection
+from xknx.telegram import Telegram, TelegramDirection, GroupAddress
 from xknx.telegram.apci import GroupValueWrite, GroupValueResponse, GroupValueRead
 from xknx.telegram.address import parse_device_group_address
 
@@ -31,6 +32,8 @@ class CommunicationObject(Generic[ValueT]):
     runtime type of `value` depends on the DPT used by the object.
     """
 
+    READ_RESPONSE_DEDUPLICATION_WINDOW = 0.05  # 50 ms
+
     def __init__(
         self,
         name: str,
@@ -42,7 +45,8 @@ class CommunicationObject(Generic[ValueT]):
         value: ValueT | None = None,
         xknx: XKNX | None = None,
         group_addresses: object | list[object] | tuple[object, ...] | None = None,
-        after_update_cb: callable | None = None,
+        on_write_cb: callable[[ValueT], None] | None = None,
+        on_response_cb: callable[[ValueT], None] | None = None,
     ) -> None:
         self.name = name
         self._configurable_flags = self._coerce_flag_set(
@@ -68,17 +72,20 @@ class CommunicationObject(Generic[ValueT]):
             )
 
         self.dpt_class = self._resolve_dpt_class(dpt_class)
-        self._payload: DPTArray | DPTBinary | None = None
         self._value: ValueT | None = None
 
         # xknx integration
         self.xknx = xknx
         self.group_addresses = self._normalize_group_addresses(group_addresses)
-        self.after_update_cb = after_update_cb
+        self.on_write_cb = on_write_cb
+        self.on_response_cb = on_response_cb
         self._telegram_cb = None
 
         if value is not None:
-            self.value = value
+            self._value = value
+
+        # read request deduplication
+        self._last_read_request: dict[str, float] = {}
 
     @staticmethod
     def _coerce_flag_mask(value: Flags | int | None) -> Flags:
@@ -142,43 +149,8 @@ class CommunicationObject(Generic[ValueT]):
         return tuple(flag for flag in Flags if flag in self._configurable_flags)
 
     @property
-    def default_value(self) -> int:
-        return int(self.default_flags)
-
-    @property
-    def readable(self) -> bool:
-        return self.is_set(Flags.READ)
-
-    @property
-    def writable(self) -> bool:
-        return self.is_set(Flags.WRITE)
-
-    @property
-    def transmittable(self) -> bool:
-        return self.is_set(Flags.TRANSMIT)
-
-    @property
-    def updateable(self) -> bool:
-        return self.is_set(Flags.UPDATE)
-
-    @property
-    def read_on_init(self) -> bool:
-        return self.is_set(Flags.READ_ON_INIT)
-
-    @property
     def value(self) -> ValueT | None:
         return self._value
-
-    @value.setter
-    def value(self, value: ValueT | None) -> None:
-        if value is None:
-            self._value = None
-            self._payload = None
-            return
-
-        if self.dpt_class is not None:
-            self._payload = self.to_knx(value)
-        self._value = value
 
     def is_set(self, flag: Flags | int) -> bool:
         return bool(self._flags & self._coerce_flag_mask(flag))
@@ -193,75 +165,44 @@ class CommunicationObject(Generic[ValueT]):
                 raise ValueError(f"Flag '{candidate.name}' is not configurable for '{self.name}'.")
             if value:
                 self._flags |= candidate
+                if candidate == Flags.COMMUNICATION:
+                    self.register()
             else:
                 self._flags &= ~candidate
+                if candidate == Flags.COMMUNICATION:
+                    self.unregister()
 
     def clear_flag(self, flag: Flags | int) -> None:
         self.set_flag(flag, value=False)
-
-    def reset(self) -> None:
-        self._flags = self.default_flags
 
     def update_flags(self, flags: Flags | int, *, enabled: bool = True) -> None:
         mask = self._coerce_flag_mask(flags)
         for flag in self._iter_flags(mask):
             self.set_flag(flag, value=enabled)
 
-    def to_knx(self, value: ValueT) -> DPTArray | DPTBinary:
+    def _to_knx(self, value: ValueT) -> DPTArray | DPTBinary:
         if self.dpt_class is None:
             raise ValueError(f"Communication object '{self.name}' has no DPT configured.")
         raw = value.value if hasattr(value, "value") else value
         return self.dpt_class.to_knx(raw)
 
-    def from_knx(self, payload: DPTArray | DPTBinary) -> ValueT:
+    def _from_knx(self, payload: DPTArray | DPTBinary) -> ValueT:
         if self.dpt_class is None:
             return cast(ValueT, payload)
         return cast(ValueT, self._materialize_value(self.dpt_class.from_knx(payload)))
 
-    def set_value(self, value: ValueT, *, from_bus: bool = False) -> ValueT:
-        if from_bus:
-            if not self.updateable:
-                raise ValueError(
-                    f"Object '{self.name}' does not allow incoming updates because UPDATE is disabled."
-                )
-
-        self._store_value(value)
-
-        if (
-            not from_bus
-            and self.transmittable
-            and self.xknx is not None
-            and self.group_address is not None
-        ):
-            self.transmit(value)
-
-        return value
-
-    def apply_telegram_value(
-        self, payload: DPTArray | DPTBinary, *, from_bus: bool = True
-    ) -> ValueT:
-        if from_bus and not self.updateable:
-            raise ValueError(
-                f"Object '{self.name}' does not accept new values because UPDATE is disabled."
-            )
-        decoded = self.from_knx(payload)
-        self._store_value(decoded)
-        self._payload = payload
-        return decoded
-
-    @property
-    def group_address(self) -> object | None:
-        return self.group_addresses[0] if self.group_addresses else None
-
-    @group_address.setter
-    def group_address(self, value: object | None) -> None:
+    def set_value(self, value: ValueT) -> None:
         if value is None:
-            self.group_addresses = []
-            return
-        self.group_addresses = [parse_device_group_address(value)]
+            raise ValueError(f"CommunicationObject::set_value '{self.name}' has no value.")
+
+        self._value = value
+        self._transmit(value)
 
     def register(self) -> None:
         """Register telegram callback with XKNX if configured."""
+        if not self.is_set(Flags.COMMUNICATION):
+            return
+
         if self.xknx is None:
             return
         if not self.group_addresses:
@@ -282,103 +223,90 @@ class CommunicationObject(Generic[ValueT]):
             pass
         self._telegram_cb = None
 
+    def _recently_responded_to_groupvalueread(self, ga: str) -> bool:
+        now = monotonic()
+
+        last_response = self._last_read_response.get(ga)
+        if last_response is None:
+            return False
+
+        return now - last_response < self.READ_RESPONSE_DEDUP_WINDOW
+
+    def _mark_responded_to_groupvalueread(self, ga: str) -> None:
+        self._last_read_request[ga] = monotonic()
+
     def _on_telegram(self, telegram: Telegram) -> None:
         """Internal telegram callback from xknx TelegramQueue."""
-        from_bus = telegram.direction == TelegramDirection.INCOMING
-        try:
-            self._process_telegram(telegram, from_bus=from_bus)
-        except Exception:
-            # swallow errors to avoid breaking telegram processing
-            pass
 
-    def send_raw(self, payload: DPTArray | DPTBinary, response: bool = False) -> None:
-        """Send payload as telegram to KNX bus using the configured XKNX instance."""
-        self._send_raw(payload, response=response)
+        if not self.is_set(Flags.COMMUNICATION):
+            return
+
+        # from_bus = telegram.direction == TelegramDirection.INCOMING
+        payload = telegram.payload
+        if payload is None:
+            return
+
+        if isinstance(payload, GroupValueRead) and self.is_set(Flags.READ):
+            ga = telegram.destination_address
+
+            if self._recently_responded_to_groupvalueread(ga):
+                return
+
+            if self.xknx is not None and self.group_addresses is not None and self._value is not None:
+                self._mark_responded_to_groupvalueread(ga)
+                self._send_raw(self._to_knx(self._value), response=True)
+            return
+
+        if isinstance(payload, GroupValueWrite):
+            new_value = self._from_knx(payload)
+
+            if self.is_set(Flags.UPDATE):
+                self._value = new_value
+
+            if self.on_write_cb is not None:
+                self.on_write_cb(new_value)
+
+        if isinstance(payload, GroupValueResponse):
+            if self.is_set(Flags.UPDATE):
+                self._value = new_value
+            
+            if self.on_response_cb is not None:
+                self.on_response_cb(new_value)
+
 
     def _send_raw(self, payload: DPTArray | DPTBinary, response: bool = False) -> None:
         """Send payload as telegram to KNX bus using the configured XKNX instance."""
         if self.xknx is None:
             raise RuntimeError("No xknx instance configured for CommunicationObject")
-        if self.group_address is None:
-            raise RuntimeError("No group_address configured for CommunicationObject")
+        if self.group_addresses is None:
+            raise RuntimeError("No group_addresses configured for CommunicationObject")
         telegram = Telegram(
-            destination_address=self.group_address,
+            destination_address=self.group_addresses[0], # First GA is the sending GA
             payload=(GroupValueResponse(payload) if response else GroupValueWrite(payload)),
             source_address=self.xknx.current_address,
             direction=TelegramDirection.OUTGOING,
         )
         self.xknx.telegrams.put_nowait(telegram)
 
-    def process_telegram(self, telegram: Any, *, from_bus: bool = True) -> ValueT | None:
-        """Public entry point for processing telegrams from the KNX bus."""
-        return self._process_telegram(telegram, from_bus=from_bus)
-
-    def _process_telegram(self, telegram: Any, *, from_bus: bool = True) -> ValueT | None:
-        payload = getattr(telegram, "payload", None)
-        if payload is None:
-            return self.value
-
-        if isinstance(payload, GroupValueRead):
-            if from_bus and self.is_set(Flags.COMMUNICATION) and self.readable and self.xknx is not None and self.group_address is not None and self._value is not None:
-                self._send_raw(self.to_knx(self._value), response=True)
-            return self._value
-
-        if isinstance(payload, (DPTArray, DPTBinary)):
-            raw_payload = payload
-        elif hasattr(payload, "value") and isinstance(payload.value, (DPTArray, DPTBinary)):
-            raw_payload = payload.value
-        else:
-            raw_payload = payload.value if hasattr(payload, "value") else payload
-
-        if not isinstance(raw_payload, (DPTArray, DPTBinary)):
-            if self.dpt_class is None:
-                self._value = cast(ValueT, raw_payload)
-                return self._value
-            raise TypeError(
-                f"Telegram payload for '{self.name}' is not a valid DPT payload: {raw_payload!r}"
-            )
-
-        return self.apply_telegram_value(raw_payload, from_bus=from_bus)
-
-    def _store_value(self, value: ValueT) -> ValueT:
-        self.value = value
-        if self.after_update_cb is not None:
-            try:
-                self.after_update_cb(value)
-            except Exception:
-                pass
-        return value
-
-    def transmit(self, value: ValueT | None = None) -> DPTArray | DPTBinary:
-        if not self.transmittable:
-            raise ValueError(
-                f"Object '{self.name}' cannot transmit because TRANSMIT is disabled."
-            )
-        current_value = self._value if value is None else value
-        if current_value is None:
-            raise ValueError(f"Object '{self.name}' has no value to transmit.")
-        payload = self.to_knx(current_value)
-        self._payload = payload
-        self._value = current_value
-        if self.xknx is not None and self.group_address is not None:
-            self._send_raw(payload)
-        return payload
+    def _transmit(self, value: ValueT | None = None) -> DPTArray | DPTBinary:
+        if self.is_set(Flags.COMMUNICATION) and self.is_set(Flags.TRANSMIT):
+            if self.xknx is not None and self.group_addresses is not None:
+                payload = self._to_knx(value)
+                self._send_raw(payload)
 
     def init(self) -> None:
         """Perform initialization actions based on flags: read_on_init."""
         if self.xknx is None:
             return
-        if self.read_on_init and self.group_address is not None:
+        # TODO - go deeper into this
+        if self.is_set(Flags.READ_ON_INIT) and self.group_addresses is not None:
             telegram = Telegram(
-                destination_address=self.group_address,
+                destination_address=self.group_address[0],
                 payload=GroupValueRead(),
                 source_address=self.xknx.current_address,
                 direction=TelegramDirection.OUTGOING,
             )
             self.xknx.telegrams.put_nowait(telegram)
-
-    def read(self) -> ValueT | None:
-        return self._value
 
     def __contains__(self, flag: Flags | int) -> bool:
         return self.is_set(flag)
@@ -402,7 +330,6 @@ class CommunicationObject(Generic[ValueT]):
     @staticmethod
     def _normalize_group_addresses(
         group_addresses: object | list[object] | tuple[object, ...] | None,
-        group_address: object | None = None,
     ) -> list[object]:
         values: list[object] = []
 
@@ -411,9 +338,6 @@ class CommunicationObject(Generic[ValueT]):
                 values.extend(group_addresses)
             else:
                 values.append(group_addresses)
-
-        if group_address is not None:
-            values.append(group_address)
 
         normalized: list[object] = []
         for item in values:

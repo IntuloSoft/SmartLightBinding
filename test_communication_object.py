@@ -1,6 +1,7 @@
 import pytest
 from unittest.mock import AsyncMock
-
+import copy
+from enum import Enum
 from xknx import XKNX
 from xknx.dpt.dpt_1 import DPTBool
 from xknx.dpt.dpt_9 import DPTTemperature
@@ -9,6 +10,30 @@ from xknx.telegram.address import GroupAddress
 from xknx.telegram.apci import GroupValueRead, GroupValueResponse, GroupValueWrite
 
 from communication_object import CommunicationObject, Flags
+
+class GatewayMode(Enum):
+    ECHO = "echo"
+    NO_ECHO = "no_echo"
+
+@pytest.fixture(params=[GatewayMode.ECHO, GatewayMode.NO_ECHO])
+def xknx_env(request, monkeypatch):
+    xknx = XKNX()
+
+    mode = request.param
+
+    async def send_telegram_mock(telegram):
+        if mode == GatewayMode.ECHO:
+            echoed = copy.deepcopy(telegram)
+            echoed.direction = TelegramDirection.INCOMING
+            xknx.telegrams.put_nowait(echoed)
+
+    monkeypatch.setattr(
+        type(xknx.cemi_handler),
+        "send_telegram",
+        AsyncMock(side_effect=send_telegram_mock),
+    )
+
+    return xknx, mode
 
 
 class TestFlags:
@@ -40,18 +65,6 @@ class TestFlags:
         obj.clear_flag(Flags.READ)
         assert not obj.is_set(Flags.READ)
 
-    def test_reset_restores_default_flags(self):
-        obj = CommunicationObject(
-            name="Temperature Object",
-            flags=Flags.NONE,
-            configurable_flags=Flags.READ | Flags.WRITE | Flags.UPDATE,
-            default_flags=Flags.READ | Flags.UPDATE,
-        )
-
-        obj.set_flag(Flags.WRITE)
-        obj.reset()
-
-        assert obj.flags == (Flags.READ | Flags.UPDATE)
 
     def test_update_flags_supports_batch_changes(self):
         obj = CommunicationObject(
@@ -301,8 +314,8 @@ class TestScenarios:
         light_status = CommunicationObject(
             name="Status",
             dpt_class=DPTBool,
-            flags=Flags.READ | Flags.WRITE | Flags.TRANSMIT | Flags.UPDATE,
-            configurable_flags=Flags.READ | Flags.WRITE | Flags.TRANSMIT | Flags.UPDATE,
+            flags=Flags.COMMUNICATION | Flags.READ | Flags.WRITE | Flags.TRANSMIT | Flags.UPDATE,
+            configurable_flags=Flags.COMMUNICATION | Flags.READ | Flags.WRITE | Flags.TRANSMIT | Flags.UPDATE,
             xknx=xknx,
             group_addresses=["1/1/1"],
             value=False,
@@ -312,8 +325,8 @@ class TestScenarios:
         status_receiver = CommunicationObject(
             name="Status Receiver",
             dpt_class=DPTBool,
-            flags=Flags.READ | Flags.UPDATE,
-            configurable_flags=Flags.READ | Flags.WRITE | Flags.TRANSMIT | Flags.UPDATE,
+            flags=Flags.COMMUNICATION | Flags.READ | Flags.UPDATE,
+            configurable_flags=Flags.COMMUNICATION | Flags.READ | Flags.WRITE | Flags.TRANSMIT | Flags.UPDATE,
             xknx=xknx,
             group_addresses=["1/1/1"],
             value=False,
@@ -369,8 +382,8 @@ class TestScenarios:
         light_object = CommunicationObject(
             name="Light Object",
             dpt_class=DPTBool,
-            flags=Flags.READ | Flags.WRITE | Flags.TRANSMIT | Flags.UPDATE,
-            configurable_flags=Flags.READ | Flags.WRITE | Flags.TRANSMIT | Flags.UPDATE,
+            flags=Flags.COMMUNICATION | Flags.READ | Flags.WRITE | Flags.TRANSMIT | Flags.UPDATE,
+            configurable_flags=Flags.COMMUNICATION | Flags.READ | Flags.WRITE | Flags.TRANSMIT | Flags.UPDATE,
             xknx=xknx,
             group_addresses=["1/1/1", "1/1/2"],
             value=False,
