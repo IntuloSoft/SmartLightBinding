@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from enum import IntFlag, auto
 from typing import Any, Generic, Iterable, TypeVar, cast
 from time import monotonic
@@ -11,7 +12,6 @@ from xknx.telegram.apci import GroupValueWrite, GroupValueResponse, GroupValueRe
 from xknx.telegram.address import parse_device_group_address
 
 ValueT = TypeVar("ValueT")
-
 
 class Flags(IntFlag):
     """Bitmask representing the KNX communication object flags."""
@@ -32,6 +32,7 @@ class CommunicationObject(Generic[ValueT]):
     """
 
     READ_RESPONSE_DEDUPLICATION_WINDOW = 0.05  # 50 ms
+    SENDING_GROUP_ADDRESS_INDEX = 0
 
     def __init__(
         self,
@@ -44,8 +45,8 @@ class CommunicationObject(Generic[ValueT]):
         value: ValueT | None = None,
         xknx: XKNX | None = None,
         group_addresses: object | list[object] | tuple[object, ...] | None = None,
-        on_write_cb: callable[[ValueT], None] | None = None,
-        on_response_cb: callable[[ValueT], None] | None = None,
+        on_write_cb: Callable[[ValueT], None] | None = None,
+        on_response_cb: Callable[[ValueT], None] | None = None,
     ) -> None:
         self.name = name
         self._configurable_flags = self._coerce_flag_set(
@@ -199,6 +200,9 @@ class CommunicationObject(Generic[ValueT]):
 
     def register(self) -> None:
         """Register telegram callback with XKNX if configured."""
+        if self._telegram_cb is not None:
+            raise RuntimeError(f"{self.name} {self.group_addresses} - cannot register twice")
+
         if not self.is_set(Flags.COMMUNICATION):
             return
 
@@ -216,10 +220,7 @@ class CommunicationObject(Generic[ValueT]):
         """Unregister telegram callback."""
         if self.xknx is None or self._telegram_cb is None:
             return
-        try:
-            self.xknx.telegram_queue.unregister_telegram_received_cb(self._telegram_cb)
-        except Exception:
-            pass
+        self.xknx.telegram_queue.unregister_telegram_received_cb(self._telegram_cb)
         self._telegram_cb = None
 
     def _recently_responded_to_groupvalueread(self, ga: str) -> bool:
@@ -229,7 +230,7 @@ class CommunicationObject(Generic[ValueT]):
         if last_response is None:
             return False
 
-        return now - last_response < self.READ_RESPONSE_DEDUP_WINDOW
+        return now - last_response < self.READ_RESPONSE_DEDUPLICATION_WINDOW
 
     def _mark_responded_to_groupvalueread(self, ga: str) -> None:
         self._last_read_request[ga] = monotonic()
@@ -253,7 +254,7 @@ class CommunicationObject(Generic[ValueT]):
 
             if self.xknx is not None and self.group_addresses is not None and self._value is not None:
                 self._mark_responded_to_groupvalueread(ga)
-                self._send_raw(self._to_knx(self._value), response=True)
+                self._send_raw(ga, self._to_knx(self._value), response=True)
             return
 
         if isinstance(payload, GroupValueWrite):
@@ -266,6 +267,8 @@ class CommunicationObject(Generic[ValueT]):
                 self.on_write_cb(new_value)
 
         if isinstance(payload, GroupValueResponse):
+            new_value = self._from_knx(payload.value)
+
             if self.is_set(Flags.UPDATE):
                 self._value = new_value
             
@@ -273,25 +276,25 @@ class CommunicationObject(Generic[ValueT]):
                 self.on_response_cb(new_value)
 
 
-    def _send_raw(self, payload: DPTArray | DPTBinary, response: bool = False) -> None:
+    def _send_raw(self, group_address: GroupAddress, payload: DPTArray | DPTBinary, response: bool = False) -> None:
         """Send payload as telegram to KNX bus using the configured XKNX instance."""
         if self.xknx is None:
             raise RuntimeError("No xknx instance configured for CommunicationObject")
         if self.group_addresses is None:
             raise RuntimeError("No group_addresses configured for CommunicationObject")
         telegram = Telegram(
-            destination_address=self.group_addresses[0], # First GA is the sending GA
+            destination_address=group_address, # First GA is the sending GA
             payload=(GroupValueResponse(payload) if response else GroupValueWrite(payload)),
             source_address=self.xknx.current_address,
             direction=TelegramDirection.OUTGOING,
         )
         self.xknx.telegrams.put_nowait(telegram)
 
-    def _transmit(self, value: ValueT | None = None) -> DPTArray | DPTBinary:
+    def _transmit(self, value: ValueT):
         if self.is_set(Flags.COMMUNICATION) and self.is_set(Flags.TRANSMIT):
             if self.xknx is not None and self.group_addresses is not None:
                 payload = self._to_knx(value)
-                self._send_raw(payload)
+                self._send_raw(self.group_addresses[CommunicationObject.SENDING_GROUP_ADDRESS_INDEX], payload, response = False)
 
     def __contains__(self, flag: Flags | int) -> bool:
         return self.is_set(flag)
@@ -314,9 +317,9 @@ class CommunicationObject(Generic[ValueT]):
 
     @staticmethod
     def _normalize_group_addresses(
-        group_addresses: object | list[object] | tuple[object, ...] | None,
-    ) -> list[object]:
-        values: list[object] = []
+        group_addresses: GroupAddress | list[GroupAddress] | tuple[GroupAddress, ...] | None,
+    ) -> list[GroupAddress]:
+        values: list[GroupAddress] = []
 
         if group_addresses is not None:
             if isinstance(group_addresses, (list, tuple, set)):
