@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from enum import IntFlag, auto
-from typing import Any, Generic, Iterable, TypeVar, cast
+from typing import Any, Generic, TypeVar, cast
 from time import monotonic
 
 from xknx import XKNX
@@ -22,54 +22,38 @@ class Flags(IntFlag):
     TRANSMIT = auto()
     UPDATE = auto()
 
+    ALL = COMMUNICATION | READ | WRITE | TRANSMIT | UPDATE
+
 
 class CommunicationObject(Generic[ValueT]):
     """Represents a KNX communication object similar to the ETS object model.
 
-    The object tracks the active KNX flags, remembers the default configuration,
+    The object tracks the active KNX flags, the editable flags,
     and stores the current application value in a DPT-generic manner. The actual
     runtime type of `value` depends on the DPT used by the object.
     """
 
-    READ_RESPONSE_DEDUPLICATION_WINDOW = 0.05  # 50 ms
-    SENDING_GROUP_ADDRESS_INDEX = 0
+    GROUPVALUEREAD_DEDUPLICATION_WINDOW = 0.05  # 50 ms
 
     def __init__(
         self,
         name: str,
         *,
+        group_addresses: GroupAddress | str | list[GroupAddress | str] | None = None,
         dpt_class: type[DPTBase] | str | int | None = None,
         flags: Flags | int = Flags.NONE,
-        configurable_flags: Flags | int | Iterable[Flags | int] | None = None,
-        default_flags: Flags | int | None = None,
+        editable_flags: Flags | int = Flags.ALL,
         value: ValueT | None = None,
         xknx: XKNX | None = None,
-        group_addresses: object | list[object] | tuple[object, ...] | None = None,
         on_write_cb: Callable[[ValueT], None] | None = None,
         on_response_cb: Callable[[ValueT], None] | None = None,
     ) -> None:
         self.name = name
-        self._configurable_flags = self._coerce_flag_set(
-            configurable_flags
-            if configurable_flags is not None
-            else tuple(flag for flag in Flags if flag != Flags.NONE)
-        )
-        self.default_flags = self._coerce_flag_mask(
-            default_flags if default_flags is not None else flags
-        )
-        self._flags = self.default_flags
+        self._flags = self._coerce_flag_mask(flags)
+        self._editable_flags = self._coerce_flag_mask(editable_flags)
 
-        if flags is not None and default_flags is None:
-            self._flags = self._coerce_flag_mask(flags)
-
-        if self.default_flags & ~self._configurable_mask:
-            raise ValueError(
-                f"Default flags for '{self.name}' contain non-configurable bits."
-            )
-        if self._flags & ~self._configurable_mask:
-            raise ValueError(
-                f"Initial flags for '{self.name}' contain non-configurable bits."
-            )
+        CommunicationObject._validate_flags(self.name, self._editable_flags, "editable_flags")
+        CommunicationObject._validate_flags(self.name, self._flags, "flags")
 
         self.dpt_class = self._resolve_dpt_class(dpt_class)
         self._value: ValueT | None = None
@@ -85,26 +69,24 @@ class CommunicationObject(Generic[ValueT]):
             self._value = value
 
         # read request deduplication
-        self._last_read_request: dict[str, float] = {}
+        self._last_read_request: dict[GroupAddress, float] = {}
+
+        if self.is_set(Flags.COMMUNICATION):
+            self.register()
+
+    @staticmethod
+    def _validate_flags(name: str, value: Flags | int, description: str) -> None:
+        invalid = int(value) & ~int(Flags.ALL)
+        if invalid:
+            raise ValueError(
+                f"Unknown {description} for {name}: 0x{invalid:X}"
+            )
 
     @staticmethod
     def _coerce_flag_mask(value: Flags | int | None) -> Flags:
         if value is None:
             return Flags.NONE
-        if isinstance(value, bool):
-            value = int(value)
         return Flags(value)
-
-    def _coerce_flag_set(self, values: Flags | int | Iterable[Flags | int]) -> set[Flags]:
-        if values is None:
-            return set()
-        if isinstance(values, (Flags, int)) and not isinstance(values, bool):
-            mask = self._coerce_flag_mask(values)
-            return set(self._iter_flags(mask))
-        normalized: set[Flags] = set()
-        for value in values:
-            normalized.add(self._coerce_flag_mask(value))
-        return normalized
 
     @staticmethod
     def _materialize_value(value: Any) -> Any:
@@ -127,26 +109,25 @@ class CommunicationObject(Generic[ValueT]):
         raise ValueError(f"Unsupported DPT definition: {dpt_class!r}")
 
     @property
-    def _configurable_mask(self) -> Flags:
-        mask = Flags.NONE
-        for flag in self._configurable_flags:
-            mask |= flag
-        return mask
-
-    @property
     def flags(self) -> Flags:
         return self._flags
 
     @flags.setter
-    def flags(self, value: Flags | int) -> None:
-        new_flags = self._coerce_flag_mask(value)
-        if new_flags & ~self._configurable_mask:
-            raise ValueError(f"Flags for '{self.name}' contain non-configurable bits.")
+    def flags(self, flags: Flags | int) -> None:
+        new_flags = self._coerce_flag_mask(flags)
+
+        changed = self._flags ^ new_flags
+
+        self._validate_editable(changed)
+
+        old_flags = self._flags
         self._flags = new_flags
 
+        self._handle_flag_changes(old_flags, new_flags)
+
     @property
-    def configurable_flags(self) -> tuple[Flags, ...]:
-        return tuple(flag for flag in Flags if flag in self._configurable_flags)
+    def editable_flags(self) -> Flags:
+        return self._editable_flags
 
     @property
     def value(self) -> ValueT | None:
@@ -155,30 +136,52 @@ class CommunicationObject(Generic[ValueT]):
     def is_set(self, flag: Flags | int) -> bool:
         return bool(self._flags & self._coerce_flag_mask(flag))
 
-    def set_flag(self, flag: Flags | int, value: bool = True) -> None:
-        mask = self._coerce_flag_mask(flag)
+    def _validate_editable(self, mask: Flags) -> None:
+        non_editable = mask & ~self._editable_flags
+        if non_editable:
+            raise ValueError(
+                f"Flags {non_editable!r} are not editable for '{self.name}'."
+            )
+
+    def set_flags(self, flags: Flags | int) -> None:
+        mask = self._coerce_flag_mask(flags)
+
         if mask == Flags.NONE:
             return
 
-        for candidate in self._iter_flags(mask):
-            if candidate not in self._configurable_flags:
-                raise ValueError(f"Flag '{candidate.name}' is not configurable for '{self.name}'.")
-            if value:
-                self._flags |= candidate
-                if candidate == Flags.COMMUNICATION:
-                    self.register()
-            else:
-                self._flags &= ~candidate
-                if candidate == Flags.COMMUNICATION:
-                    self.unregister()
+        self._validate_editable(mask)
 
-    def clear_flag(self, flag: Flags | int) -> None:
-        self.set_flag(flag, value=False)
+        old_flags = self._flags
+        self._flags |= mask
 
-    def update_flags(self, flags: Flags | int, *, enabled: bool = True) -> None:
+        self._handle_flag_changes(old_flags, self._flags)
+
+    def clear_flags(self, flags: Flags | int) -> None:
         mask = self._coerce_flag_mask(flags)
-        for flag in self._iter_flags(mask):
-            self.set_flag(flag, value=enabled)
+
+        if mask == Flags.NONE:
+            return
+
+        self._validate_editable(mask)
+
+        old_flags = self._flags
+        self._flags &= ~mask
+
+        self._handle_flag_changes(old_flags, self._flags)
+
+    def _handle_flag_changes(
+        self,
+        old_flags: Flags,
+        new_flags: Flags,
+    ) -> None:
+        communication_was_enabled = bool(old_flags & Flags.COMMUNICATION)
+        communication_is_enabled = bool(new_flags & Flags.COMMUNICATION)
+
+        if not communication_was_enabled and communication_is_enabled:
+            self.register()
+
+        elif communication_was_enabled and not communication_is_enabled:
+            self.unregister()
 
     def _to_knx(self, value: ValueT) -> DPTArray | DPTBinary:
         if self.dpt_class is None:
@@ -216,6 +219,15 @@ class CommunicationObject(Generic[ValueT]):
             match_for_outgoing=True,
         )
 
+    @property
+    def sending_group_address(self) -> GroupAddress:
+        if not self.group_addresses:
+            raise RuntimeError(
+                f"CommunicationObject '{self.name}' has no group address."
+            )
+
+        return self.group_addresses[0]
+
     def unregister(self) -> None:
         """Unregister telegram callback."""
         if self.xknx is None or self._telegram_cb is None:
@@ -223,16 +235,16 @@ class CommunicationObject(Generic[ValueT]):
         self.xknx.telegram_queue.unregister_telegram_received_cb(self._telegram_cb)
         self._telegram_cb = None
 
-    def _recently_responded_to_groupvalueread(self, ga: str) -> bool:
+    def _recently_responded_to_groupvalueread(self, ga: GroupAddress) -> bool:
         now = monotonic()
 
         last_response = self._last_read_request.get(ga)
         if last_response is None:
             return False
 
-        return now - last_response < self.READ_RESPONSE_DEDUPLICATION_WINDOW
+        return now - last_response < self.GROUPVALUEREAD_DEDUPLICATION_WINDOW
 
-    def _mark_responded_to_groupvalueread(self, ga: str) -> None:
+    def _mark_responded_to_groupvalueread(self, ga: GroupAddress) -> None:
         self._last_read_request[ga] = monotonic()
 
     def _on_telegram(self, telegram: Telegram) -> None:
@@ -252,7 +264,7 @@ class CommunicationObject(Generic[ValueT]):
             if self._recently_responded_to_groupvalueread(ga):
                 return
 
-            if self.xknx is not None and self.group_addresses is not None and self._value is not None:
+            if self._value is not None:
                 self._mark_responded_to_groupvalueread(ga)
                 self._send_raw(ga, self._to_knx(self._value), response=True)
             return
@@ -280,8 +292,8 @@ class CommunicationObject(Generic[ValueT]):
         """Send payload as telegram to KNX bus using the configured XKNX instance."""
         if self.xknx is None:
             raise RuntimeError("No xknx instance configured for CommunicationObject")
-        if self.group_addresses is None:
-            raise RuntimeError("No group_addresses configured for CommunicationObject")
+        if not self.group_addresses:
+            return
         telegram = Telegram(
             destination_address=group_address, # First GA is the sending GA
             payload=(GroupValueResponse(payload) if response else GroupValueWrite(payload)),
@@ -290,11 +302,17 @@ class CommunicationObject(Generic[ValueT]):
         )
         self.xknx.telegrams.put_nowait(telegram)
 
-    def _transmit(self, value: ValueT):
-        if self.is_set(Flags.COMMUNICATION) and self.is_set(Flags.TRANSMIT):
-            if self.xknx is not None and self.group_addresses is not None:
-                payload = self._to_knx(value)
-                self._send_raw(self.group_addresses[CommunicationObject.SENDING_GROUP_ADDRESS_INDEX], payload, response = False)
+    def _transmit(self, value: ValueT) -> None:
+        if not (self.is_set(Flags.COMMUNICATION) and self.is_set(Flags.TRANSMIT)):
+            return
+        if not self.group_addresses:
+            return
+
+        self._send_raw(
+            self.sending_group_address,
+            payload = self._to_knx(value),
+            response = False
+        )
 
     def __contains__(self, flag: Flags | int) -> bool:
         return self.is_set(flag)
@@ -304,22 +322,25 @@ class CommunicationObject(Generic[ValueT]):
 
     def __repr__(self) -> str:
         return (
-            f"CommunicationObject(name='{self.name}', flags={self._flags!r}, "
-            f"configurable={self.configurable_flags}, default={self.default_flags!r}, "
-            f"value={self._value!r}, dpt={getattr(self.dpt_class, '__name__', None)})"
-        )
-
-    @staticmethod
-    def _iter_flags(mask: Flags) -> tuple[Flags, ...]:
-        return tuple(
-            flag for flag in Flags if flag != Flags.NONE and bool(mask & flag)
+            f"CommunicationObject("
+            f"name={self.name!r}, "
+            f"flags={self._flags!r}, "
+            f"editable_flags={self._editable_flags!r}, "
+            f"value={self._value!r}, "
+            f"dpt={getattr(self.dpt_class, '__name__', None)!r}"
+            f")"
         )
 
     @staticmethod
     def _normalize_group_addresses(
-        group_addresses: GroupAddress | list[GroupAddress] | tuple[GroupAddress, ...] | None,
+        group_addresses:
+            GroupAddress
+            | str
+            | list[GroupAddress | str]
+            | tuple[GroupAddress | str, ...]
+            | None,
     ) -> list[GroupAddress]:
-        values: list[GroupAddress] = []
+        values: list[GroupAddress | str] = []
 
         if group_addresses is not None:
             if isinstance(group_addresses, (list, tuple, set)):
@@ -327,7 +348,7 @@ class CommunicationObject(Generic[ValueT]):
             else:
                 values.append(group_addresses)
 
-        normalized: list[object] = []
+        normalized: list[GroupAddress] = []
         for item in values:
             if item is None:
                 continue

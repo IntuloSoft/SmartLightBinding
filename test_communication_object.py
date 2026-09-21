@@ -56,12 +56,11 @@ class TestFlags:
             name="TestObject",
             dpt_class=DPTBool,
             flags=Flags.COMMUNICATION | Flags.READ,
-            configurable_flags=Flags.COMMUNICATION | Flags.READ,
+            editable_flags=Flags.COMMUNICATION | Flags.READ,
             xknx=xknx,
             group_addresses=["1/1/1"],
             value=True,
         )
-        obj.register()
 
         xknx.telegrams.put_nowait(
             Telegram(
@@ -79,7 +78,7 @@ class TestFlags:
             payload=GroupValueResponse(DPTBool.to_knx(True)),
         )
 
-        obj.clear_flag(Flags.READ)
+        obj.clear_flags(Flags.READ)
         xknx.telegrams.put_nowait(
             Telegram(
                 destination_address=GroupAddress("1/1/1"),
@@ -104,13 +103,11 @@ class TestFlags:
             name="TestObject",
             dpt_class=DPTBool,
             flags=Flags.COMMUNICATION | Flags.WRITE,
-            configurable_flags=Flags.COMMUNICATION | Flags.WRITE | Flags.UPDATE,
             xknx=xknx,
             group_addresses=["1/1/1"],
             value=True,
             on_write_cb=on_write
         )
-        obj.register()
 
         xknx.telegrams.put_nowait(
             Telegram(
@@ -128,7 +125,7 @@ class TestFlags:
 
         # use update flag in combination with write flag
 
-        obj.set_flag(Flags.UPDATE)
+        obj.set_flags(Flags.UPDATE)
         xknx.telegrams.put_nowait(
             Telegram(
                 destination_address=GroupAddress("1/1/1"),
@@ -144,8 +141,8 @@ class TestFlags:
         assert obj.value is False
 
         # Disable write flag
-        obj.clear_flag(Flags.UPDATE)
-        obj.clear_flag(Flags.WRITE)
+        obj.clear_flags(Flags.UPDATE)
+        obj.clear_flags(Flags.WRITE)
         xknx.telegrams.put_nowait(
             Telegram(
                 destination_address=GroupAddress("1/1/1"),
@@ -172,13 +169,11 @@ class TestFlags:
             name="TestObject",
             dpt_class=DPTBool,
             flags=Flags.COMMUNICATION | Flags.TRANSMIT | Flags.WRITE,
-            configurable_flags=Flags.COMMUNICATION | Flags.TRANSMIT | Flags.WRITE,
             xknx=xknx,
             group_addresses=["1/1/1"],
             value=True,
             on_write_cb=on_write
         )
-        obj.register()
 
         obj.set_value(False)
 
@@ -198,7 +193,7 @@ class TestFlags:
         values.clear()
 
         # # use update flag in combination with write flag
-        obj.clear_flag(Flags.TRANSMIT)
+        obj.clear_flags(Flags.TRANSMIT)
         obj.set_value(True)
         
         await xknx.telegram_queue._process_all_telegrams()
@@ -219,13 +214,11 @@ class TestFlags:
             name="TestObject",
             dpt_class=DPTBool,
             flags=Flags.COMMUNICATION | Flags.UPDATE,
-            configurable_flags=Flags.COMMUNICATION | Flags.WRITE | Flags.UPDATE,
             xknx=xknx,
             group_addresses=["1/1/1"],
             value=True,
             on_write_cb=on_write
         )
-        obj.register()
 
         xknx.telegrams.put_nowait(
             Telegram(
@@ -241,7 +234,7 @@ class TestFlags:
         assert obj.value is False
 
         # use update flag in combination with write flag
-        obj.set_flag(Flags.WRITE)
+        obj.set_flags(Flags.WRITE)
         xknx.telegrams.put_nowait(
             Telegram(
                 destination_address=GroupAddress("1/1/1"),
@@ -257,7 +250,7 @@ class TestFlags:
         assert obj.value is True
 
         # use update flag in combination with write flag
-        obj.clear_flag(Flags.UPDATE)
+        obj.clear_flags(Flags.UPDATE)
         xknx.telegrams.put_nowait(
             Telegram(
                 destination_address=GroupAddress("1/1/1"),
@@ -287,7 +280,6 @@ class TestScenarios:
             name="Status",
             dpt_class=DPTBool,
             flags=Flags.COMMUNICATION | Flags.READ | Flags.WRITE | Flags.TRANSMIT | Flags.UPDATE,
-            configurable_flags=Flags.COMMUNICATION | Flags.READ | Flags.WRITE | Flags.TRANSMIT | Flags.UPDATE,
             xknx=xknx,
             group_addresses=["1/1/1"],
             value=False,
@@ -298,14 +290,10 @@ class TestScenarios:
             name="Status Receiver",
             dpt_class=DPTBool,
             flags=Flags.COMMUNICATION | Flags.READ | Flags.UPDATE,
-            configurable_flags=Flags.COMMUNICATION | Flags.READ | Flags.WRITE | Flags.TRANSMIT | Flags.UPDATE,
             xknx=xknx,
             group_addresses=["1/1/1"],
             value=False,
         )
-
-        light_status.register()
-        status_receiver.register()
 
         light_status.set_value(True)
         await xknx.telegram_queue._process_all_telegrams()
@@ -325,13 +313,10 @@ class TestScenarios:
             name="Status Object",
             dpt_class=DPTBool,
             flags=Flags.READ | Flags.WRITE | Flags.TRANSMIT | Flags.UPDATE,
-            configurable_flags=Flags.READ | Flags.WRITE | Flags.TRANSMIT | Flags.UPDATE,
             xknx=xknx,
             group_addresses=["1/1/1", "1/1/2"],
             value=False,
         )
-
-        status_object.register()
 
         assert len(status_object.group_addresses) == 2
         assert status_object.group_address == status_object.group_addresses[0]
@@ -355,13 +340,10 @@ class TestScenarios:
             name="Light Object",
             dpt_class=DPTBool,
             flags=Flags.COMMUNICATION | Flags.READ | Flags.WRITE | Flags.TRANSMIT | Flags.UPDATE,
-            configurable_flags=Flags.COMMUNICATION | Flags.READ | Flags.WRITE | Flags.TRANSMIT | Flags.UPDATE,
             xknx=xknx,
             group_addresses=["1/1/1", "1/1/2"],
             value=False,
         )
-
-        light_object.register()
 
         # Simulate application command: switch command is sent on the first GA.
         light_object.set_value(True)
@@ -392,7 +374,6 @@ class TestScenarios:
             name="Disabled Object",
             dpt_class=DPTBool,
             flags=Flags.NONE,
-            configurable_flags={Flags.READ, Flags.WRITE, Flags.TRANSMIT, Flags.UPDATE},
             xknx=xknx,
             group_addresses=["1/1/1"],
             value=False,
