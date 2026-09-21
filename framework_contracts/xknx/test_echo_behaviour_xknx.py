@@ -13,7 +13,6 @@ async def test_outgoing_plus_echo(monkeypatch):
 
     async def send_telegram_mock(telegram):
         # Simulate a KNX/IP interface that echoes the telegram back.
-        
         echoed = copy.deepcopy(telegram)
         assert telegram.direction == TelegramDirection.OUTGOING
         echoed.direction = TelegramDirection.INCOMING
@@ -29,6 +28,7 @@ async def test_outgoing_plus_echo(monkeypatch):
             (
                 telegram.direction,
                 str(telegram.destination_address),
+                telegram.payload
             )
         )
 
@@ -50,7 +50,7 @@ async def test_outgoing_plus_echo(monkeypatch):
 
     assert len(received) == 1
     assert received == [
-        (TelegramDirection.INCOMING, "1/1/1"),
+        (TelegramDirection.INCOMING, "1/1/1", GroupValueWrite(value=b'\x01')),
     ]
 
     xknx.telegrams.put_nowait(
@@ -65,7 +65,7 @@ async def test_outgoing_plus_echo(monkeypatch):
 
     assert len(received) == 3
     assert received == [
-        (TelegramDirection.INCOMING, "1/1/1"),
-        (TelegramDirection.OUTGOING, "1/1/1"),
-        (TelegramDirection.INCOMING, "1/1/1"),
-    ]
+        (TelegramDirection.INCOMING, "1/1/1", GroupValueWrite(value=b'\x01')),
+        (TelegramDirection.OUTGOING, "1/1/1", GroupValueWrite(value=b'\x01')),
+        (TelegramDirection.INCOMING, "1/1/1", GroupValueWrite(value=b'\x01')),
+    ],received

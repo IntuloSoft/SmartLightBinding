@@ -26,6 +26,7 @@ def xknx_env(request, monkeypatch):
 
     async def send_telegram_mock(telegram):
         sent_telegrams.append(telegram) 
+        assert telegram.direction == TelegramDirection.OUTGOING
         if mode == GatewayMode.ECHO:
             echoed = copy.deepcopy(telegram)
             echoed.direction = TelegramDirection.INCOMING
@@ -52,7 +53,7 @@ class TestFlags:
         
         # Test READ disabled: no response to read request
         obj = CommunicationObject(
-            name="Read Object Disabled",
+            name="TestObject",
             dpt_class=DPTBool,
             flags=Flags.COMMUNICATION | Flags.READ,
             configurable_flags=Flags.COMMUNICATION | Flags.READ,
@@ -100,7 +101,7 @@ class TestFlags:
         
         # Test READ disabled: no response to read request
         obj = CommunicationObject(
-            name="Read Object Disabled",
+            name="TestObject",
             dpt_class=DPTBool,
             flags=Flags.COMMUNICATION | Flags.WRITE,
             configurable_flags=Flags.COMMUNICATION | Flags.WRITE | Flags.UPDATE,
@@ -159,6 +160,53 @@ class TestFlags:
         assert obj.value is False
 
     @pytest.mark.asyncio
+    async def test_flag_transmit(self, xknx_env):
+        xknx, mode, sent_telegrams = xknx_env
+
+        values = []
+        def on_write(value):
+            values.append(value)
+        
+        # Test READ disabled: no response to read request
+        obj = CommunicationObject(
+            name="TestObject",
+            dpt_class=DPTBool,
+            flags=Flags.COMMUNICATION | Flags.TRANSMIT | Flags.WRITE,
+            configurable_flags=Flags.COMMUNICATION | Flags.TRANSMIT | Flags.WRITE,
+            xknx=xknx,
+            group_addresses=["1/1/1"],
+            value=True,
+            on_write_cb=on_write
+        )
+        obj.register()
+
+        obj.set_value(False)
+
+        await xknx.telegram_queue._process_all_telegrams()
+        assert len(sent_telegrams) == 1
+        assert sent_telegrams.pop() == Telegram(
+            destination_address=GroupAddress("1/1/1"),
+            direction=TelegramDirection.OUTGOING,
+            payload=GroupValueWrite(DPTBool.to_knx(False)),
+        )
+        if mode == GatewayMode.ECHO:
+            assert len(values) == 2
+            assert values == [False,False]
+        if mode == GatewayMode.NO_ECHO:
+            assert len(values) == 1
+            assert values == [False]
+        values.clear()
+
+        # # use update flag in combination with write flag
+        obj.clear_flag(Flags.TRANSMIT)
+        obj.set_value(True)
+        
+        await xknx.telegram_queue._process_all_telegrams()
+        assert len(sent_telegrams) == 0
+        assert len(values) == 0
+
+
+    @pytest.mark.asyncio
     async def test_flag_update(self, xknx_env):
         xknx, _, sent_telegrams = xknx_env
 
@@ -168,7 +216,7 @@ class TestFlags:
         
         # Test READ disabled: no response to read request
         obj = CommunicationObject(
-            name="Read Object Disabled",
+            name="TestObject",
             dpt_class=DPTBool,
             flags=Flags.COMMUNICATION | Flags.UPDATE,
             configurable_flags=Flags.COMMUNICATION | Flags.WRITE | Flags.UPDATE,
@@ -224,198 +272,6 @@ class TestFlags:
         assert values.pop() == False
         assert obj.value is True
         
-
-    # def test_flag_transmit(self, monkeypatch):
-    #     xknx = XKNX()
-    #     monkeypatch.setattr(type(xknx.cemi_handler), "send_telegram", AsyncMock())
-
-    #     # Test TRANSMIT disabled: value changes but no telegram sent
-    #     obj_disabled = CommunicationObject(
-    #         name="Transmit Object Disabled",
-    #         dpt_class=DPTBool,
-    #         flags=Flags.NONE,
-    #         configurable_flags={Flags.TRANSMIT, Flags.COMMUNICATION},
-    #         xknx=xknx,
-    #         group_addresses=["1/1/1"],
-    #     )
-
-    #     obj_disabled.set_value(True)
-    #     assert obj_disabled.value is True
-    #     assert xknx.telegrams.empty()
-
-    #     # Test TRANSMIT enabled with COMMUNICATION: telegram is sent
-    #     obj_enabled = CommunicationObject(
-    #         name="Transmit Object Enabled",
-    #         dpt_class=DPTBool,
-    #         flags=Flags.TRANSMIT | Flags.COMMUNICATION,
-    #         configurable_flags={Flags.TRANSMIT, Flags.COMMUNICATION},
-    #         xknx=xknx,
-    #         group_addresses=["1/1/1"],
-    #     )
-
-    #     obj_enabled.set_value(True)
-    #     assert obj_enabled.value is True
-    #     assert not xknx.telegrams.empty()
-
-    # def test_flag_update(self):
-    #     # Test UPDATE disabled: raises error when applying telegram value
-    #     obj_disabled = CommunicationObject(
-    #         name="Update Object Disabled",
-    #         dpt_class=DPTBool,
-    #         flags=Flags.NONE,
-    #         configurable_flags=Flags.UPDATE,
-    #         value=False,
-    #     )
-
-    #     with pytest.raises(ValueError, match="UPDATE is disabled"):
-    #         obj_disabled.apply_telegram_value(DPTBool.to_knx(True))
-    #     assert obj_disabled.value is False
-
-    #     # Test UPDATE enabled: telegram value applied successfully
-    #     obj_enabled = CommunicationObject(
-    #         name="Update Object Enabled",
-    #         dpt_class=DPTBool,
-    #         flags=Flags.UPDATE,
-    #         configurable_flags=Flags.UPDATE,
-    #         value=False,
-    #     )
-
-    #     obj_enabled.apply_telegram_value(DPTBool.to_knx(True))
-    #     assert obj_enabled.value is True
-
-    # def test_flag_read_on_init(self, monkeypatch):
-    #     xknx = XKNX()
-    #     monkeypatch.setattr(type(xknx.cemi_handler), "send_telegram", AsyncMock())
-
-    #     # Test READ_ON_INIT disabled: no read request sent
-    #     obj_disabled = CommunicationObject(
-    #         name="Read On Init Object Disabled",
-    #         dpt_class=DPTBool,
-    #         flags=Flags.NONE,
-    #         configurable_flags={Flags.READ_ON_INIT, Flags.COMMUNICATION},
-    #         xknx=xknx,
-    #         group_addresses=["1/1/2"],
-    #         value=False,
-    #     )
-
-    #     obj_disabled.init()
-    #     assert xknx.telegrams.empty()
-
-    #     # Test READ_ON_INIT enabled with COMMUNICATION: read request is sent
-    #     obj_enabled = CommunicationObject(
-    #         name="Read On Init Object Enabled",
-    #         dpt_class=DPTBool,
-    #         flags=Flags.READ_ON_INIT | Flags.COMMUNICATION,
-    #         configurable_flags={Flags.READ_ON_INIT, Flags.COMMUNICATION},
-    #         xknx=xknx,
-    #         group_addresses=["1/1/2"],
-    #         value=False,
-    #     )
-
-    #     obj_enabled.init()
-    #     assert not xknx.telegrams.empty()
-
-    # def test_flag_communication(self, monkeypatch):
-    #     xknx = XKNX()
-    #     monkeypatch.setattr(type(xknx.cemi_handler), "send_telegram", AsyncMock())
-
-    #     # Test COMMUNICATION disabled: no bus operations, but internal access works
-    #     obj_disabled = CommunicationObject(
-    #         name="Communication Disabled Object",
-    #         dpt_class=DPTBool,
-    #         flags=Flags.NONE,
-    #         configurable_flags={Flags.READ, Flags.WRITE, Flags.TRANSMIT, Flags.UPDATE, Flags.COMMUNICATION},
-    #         xknx=xknx,
-    #         group_addresses=["1/1/1"],
-    #         value=False,
-    #     )
-
-    #     assert obj_disabled.read() is False
-    #     obj_disabled.set_value(True)
-    #     assert obj_disabled.value is True
-    #     assert xknx.telegrams.empty()
-
-    #     with pytest.raises(ValueError, match="UPDATE is disabled"):
-    #         obj_disabled.apply_telegram_value(DPTBool.to_knx(True))
-
-    #     obj_disabled.init()
-    #     assert xknx.telegrams.empty()
-
-    #     # Test COMMUNICATION enabled: bus operations work with appropriate flags
-    #     obj_enabled = CommunicationObject(
-    #         name="Communication Enabled Object",
-    #         dpt_class=DPTBool,
-    #         flags=Flags.COMMUNICATION | Flags.TRANSMIT,
-    #         configurable_flags={Flags.READ, Flags.WRITE, Flags.TRANSMIT, Flags.UPDATE, Flags.COMMUNICATION},
-    #         xknx=xknx,
-    #         group_addresses=["1/1/2"],
-    #         value=False,
-    #     )
-
-    #     obj_enabled.set_value(True)
-    #     assert obj_enabled.value is True
-    #     assert not xknx.telegrams.empty()
-
-
-
-
-
-    # def test_default_flags_are_applied_and_exposed(self):
-    #     obj = CommunicationObject(
-    #         name="Switch Object",
-    #         flags=Flags.READ,
-    #         configurable_flags=Flags.READ | Flags.WRITE | Flags.TRANSMIT,
-    #         default_flags=Flags.READ | Flags.WRITE,
-    #     )
-
-    #     assert obj.flags == (Flags.READ | Flags.WRITE)
-    #     assert obj.default_flags == (Flags.READ | Flags.WRITE)
-    #     assert obj.default_value == int(Flags.READ | Flags.WRITE)
-
-    # def test_only_configurable_flags_can_be_changed(self):
-    #     obj = CommunicationObject(
-    #         name="Light Object",
-    #         flags=Flags.READ,
-    #         configurable_flags=Flags.READ | Flags.WRITE | Flags.TRANSMIT,
-    #     )
-
-    #     obj.set_flag(Flags.WRITE)
-    #     assert obj.is_set(Flags.WRITE)
-
-    #     with pytest.raises(ValueError, match="not configurable"):
-    #         obj.set_flag(Flags.UPDATE)
-
-    #     obj.clear_flag(Flags.READ)
-    #     assert not obj.is_set(Flags.READ)
-
-
-    # def test_update_flags_supports_batch_changes(self):
-    #     obj = CommunicationObject(
-    #         name="Dimmable Object",
-    #         flags=Flags.NONE,
-    #         configurable_flags=Flags.READ | Flags.WRITE | Flags.TRANSMIT | Flags.UPDATE,
-    #         default_flags=Flags.READ,
-    #     )
-
-    #     obj.update_flags(Flags.WRITE | Flags.TRANSMIT)
-    #     assert obj.flags == (Flags.WRITE | Flags.TRANSMIT | Flags.READ)
-
-    #     obj.update_flags(Flags.WRITE | Flags.TRANSMIT, enabled=False)
-    #     assert obj.flags == Flags.READ
-
-    # def test_knx_bitmask_behavior_matches_expected_int_value(self):
-    #     obj = CommunicationObject(
-    #         name="Bitmask Object",
-    #         flags=Flags.READ | Flags.WRITE,
-    #         configurable_flags=tuple(flag for flag in Flags if flag != Flags.NONE),
-    #     )
-
-    #     assert int(obj) == int(Flags.READ | Flags.WRITE)
-    #     assert obj.flags == Flags.READ | Flags.WRITE
-    #     assert Flags.READ in obj
-    #     assert Flags.WRITE in obj
-
-    
 
 class TestScenarios:
 
