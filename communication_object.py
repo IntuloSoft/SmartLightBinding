@@ -226,7 +226,7 @@ class CommunicationObject(Generic[ValueT]):
     def _recently_responded_to_groupvalueread(self, ga: str) -> bool:
         now = monotonic()
 
-        last_response = self._last_read_response.get(ga)
+        last_response = self._last_read_request.get(ga)
         if last_response is None:
             return False
 
@@ -258,19 +258,19 @@ class CommunicationObject(Generic[ValueT]):
             return
 
         if isinstance(payload, GroupValueWrite):
-            new_value = self._from_knx(payload)
+            new_value = self._from_knx(payload.value)
 
             if self.is_set(Flags.UPDATE):
                 self._value = new_value
 
-            if self.on_write_cb is not None:
+            if self.is_set(Flags.WRITE) and self.on_write_cb is not None:
                 self.on_write_cb(new_value)
 
         if isinstance(payload, GroupValueResponse):
             if self.is_set(Flags.UPDATE):
                 self._value = new_value
             
-            if self.on_response_cb is not None:
+            if self.is_set(Flags.WRITE) and self.on_response_cb is not None:
                 self.on_response_cb(new_value)
 
 
