@@ -21,7 +21,6 @@ class Flags(IntFlag):
     WRITE = auto()
     TRANSMIT = auto()
     UPDATE = auto()
-    READ_ON_INIT = auto()
 
 
 class CommunicationObject(Generic[ValueT]):
@@ -293,20 +292,6 @@ class CommunicationObject(Generic[ValueT]):
             if self.xknx is not None and self.group_addresses is not None:
                 payload = self._to_knx(value)
                 self._send_raw(payload)
-
-    def init(self) -> None:
-        """Perform initialization actions based on flags: read_on_init."""
-        if self.xknx is None:
-            return
-        # TODO - go deeper into this
-        if self.is_set(Flags.READ_ON_INIT) and self.group_addresses is not None:
-            telegram = Telegram(
-                destination_address=self.group_address[0],
-                payload=GroupValueRead(),
-                source_address=self.xknx.current_address,
-                direction=TelegramDirection.OUTGOING,
-            )
-            self.xknx.telegrams.put_nowait(telegram)
 
     def __contains__(self, flag: Flags | int) -> bool:
         return self.is_set(flag)
