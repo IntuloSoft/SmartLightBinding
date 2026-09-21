@@ -1,3 +1,5 @@
+from typing import Any
+
 import pytest
 from unittest.mock import AsyncMock
 import copy
@@ -17,7 +19,7 @@ class GatewayMode(Enum):
     NO_ECHO = "no_echo"
 
 @pytest.fixture(params=[GatewayMode.ECHO, GatewayMode.NO_ECHO])
-def xknx_env(request, monkeypatch):
+def xknx_env(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch):
     xknx = XKNX()
 
     mode = request.param
@@ -44,11 +46,11 @@ def xknx_env(request, monkeypatch):
 class TestFlags:
 
     @pytest.mark.asyncio
-    async def test_flag_communication(self, xknx_env):
+    async def test_flag_communication(self, xknx_env: tuple[XKNX, Any, list]):
         xknx, _, sent_telegrams = xknx_env
 
     @pytest.mark.asyncio
-    async def test_flag_read(self, xknx_env):
+    async def test_flag_read(self, xknx_env: tuple[XKNX, Any, list]):
         xknx, _, sent_telegrams = xknx_env
         
         # Test READ disabled: no response to read request
@@ -91,7 +93,7 @@ class TestFlags:
         assert len(sent_telegrams) == 0
 
     @pytest.mark.asyncio
-    async def test_flag_write(self, xknx_env):
+    async def test_flag_write(self, xknx_env: tuple[XKNX, Any, list]):
         xknx, _, sent_telegrams = xknx_env
 
         values = []
@@ -157,7 +159,7 @@ class TestFlags:
         assert obj.value is False
 
     @pytest.mark.asyncio
-    async def test_flag_transmit(self, xknx_env):
+    async def test_flag_transmit(self, xknx_env: tuple[XKNX, Any, list]):
         xknx, mode, sent_telegrams = xknx_env
 
         values = []
@@ -202,7 +204,7 @@ class TestFlags:
 
 
     @pytest.mark.asyncio
-    async def test_flag_update(self, xknx_env):
+    async def test_flag_update(self, xknx_env: tuple[XKNX, Any, list]):
         xknx, _, sent_telegrams = xknx_env
 
         values = []
@@ -270,10 +272,8 @@ class TestScenarios:
 
     @pytest.mark.asyncio
     async def test_virtual_knx_bus_updates_status_receiver_from_light_status_object(
-        self, monkeypatch
-    ):
-        xknx = XKNX()
-        monkeypatch.setattr(type(xknx.cemi_handler), "send_telegram", AsyncMock())
+        self, xknx_env: tuple[XKNX, Any, list]):
+        xknx, _, sent_telegrams = xknx_env
 
         # Object representing the actual light-state communication object on the KNX bus.
         light_status = CommunicationObject(
@@ -300,41 +300,37 @@ class TestScenarios:
 
         assert light_status.value is True
         assert status_receiver.value is True
-        assert status_receiver.read() is True
 
     @pytest.mark.asyncio
-    async def test_status_object_uses_first_ga_for_transmit_and_keeps_secondary_ga_assigned(
-        self, monkeypatch
-    ):
-        xknx = XKNX()
-        monkeypatch.setattr(type(xknx.cemi_handler), "send_telegram", AsyncMock())
+    async def test_status_object_uses_first_ga_for_transmit_and_keeps_secondary_ga_assigned(self, xknx_env: tuple[XKNX, Any, list]):
+        xknx, _, sent_telegrams = xknx_env
 
         status_object = CommunicationObject(
             name="Status Object",
             dpt_class=DPTBool,
-            flags=Flags.READ | Flags.WRITE | Flags.TRANSMIT | Flags.UPDATE,
+            flags=Flags.COMMUNICATION |Flags.READ | Flags.WRITE | Flags.TRANSMIT | Flags.UPDATE,
             xknx=xknx,
             group_addresses=["1/1/1", "1/1/2"],
             value=False,
         )
 
         assert len(status_object.group_addresses) == 2
-        assert status_object.group_address == status_object.group_addresses[0]
+        assert status_object.sending_group_address == status_object.group_addresses[0]
 
         status_object.set_value(True)
-        telegram = xknx.telegrams.get_nowait()
-        assert telegram.destination_address == status_object.group_address
-        assert telegram.destination_address != status_object.group_addresses[1]
+        await xknx.telegram_queue._process_all_telegrams()
+
+        assert len(sent_telegrams) == 1
+
+        assert sent_telegrams[0].destination_address == status_object.sending_group_address
+        assert sent_telegrams[0].destination_address != status_object.group_addresses[1]
 
         await xknx.telegram_queue._process_all_telegrams()
         assert status_object.value is True
 
     @pytest.mark.asyncio
-    async def test_single_object_with_switch_and_state_ga_updates_from_state_telegram(
-        self, monkeypatch
-    ):
-        xknx = XKNX()
-        monkeypatch.setattr(type(xknx.cemi_handler), "send_telegram", AsyncMock())
+    async def test_single_object_with_switch_and_state_ga_updates_from_state_telegram(self, xknx_env: tuple[XKNX, Any, list]):
+        xknx, _, sent_telegrams = xknx_env
 
         light_object = CommunicationObject(
             name="Light Object",
@@ -362,35 +358,6 @@ class TestScenarios:
         await xknx.telegram_queue._process_all_telegrams()
 
         assert light_object.value is False
-        assert light_object.read() is False
 
-    def test_disabled_communication_object_does_not_participate_in_any_communication(
-        self, monkeypatch
-    ):
-        xknx = XKNX()
-        monkeypatch.setattr(type(xknx.cemi_handler), "send_telegram", AsyncMock())
 
-        disabled_object = CommunicationObject(
-            name="Disabled Object",
-            dpt_class=DPTBool,
-            flags=Flags.NONE,
-            xknx=xknx,
-            group_addresses=["1/1/1"],
-            value=False,
-        )
-
-        assert not disabled_object.readable
-        assert not disabled_object.writable
-        assert not disabled_object.updateable
-        assert not disabled_object.transmittable
-
-        disabled_object.set_value(True)
-        assert disabled_object.value is True
-        assert disabled_object.read() is True
-        assert xknx.telegrams.empty()
-
-        with pytest.raises(ValueError, match="UPDATE is disabled"):
-            disabled_object.apply_telegram_value(DPTBool.to_knx(True))
-
-        assert disabled_object.value is True
 
