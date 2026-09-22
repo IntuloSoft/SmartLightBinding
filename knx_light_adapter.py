@@ -15,6 +15,11 @@ from xknx.dpt.dpt_7 import DPT2ByteUnsigned
 from xknx.dpt.dpt_232 import DPTColorRGB
 from xknx.dpt.dpt_3 import DPTControlDimming
 
+from homeassistant.core import (
+    HomeAssistant,
+    State,
+)
+
 class KnxLightAdapter:
 
     def __init__(
@@ -41,7 +46,7 @@ class KnxLightAdapter:
         self._xknx = xknx
         self._entity_id = entity_id
 
-        self._hass = None
+        self._hass: HomeAssistant | None = None
         self._unsubscribe_state_listener: (Callable[[], None] | None) = None
 
         self._dimming_time = dimming_time
@@ -257,7 +262,110 @@ class KnxLightAdapter:
 
     def _on_entity_state_changed(
         self,
-        old_state,
-        new_state,
+        old_state: State | None,
+        new_state: State | None,
     ) -> None:
+        """
+        Handle a Home Assistant state change for the configured light entity.
+
+        Parameters
+        ----------
+        old_state:
+            Previous state from Home Assistant.
+
+            Examples:
+
+                state: "off"
+                attributes:
+                    brightness: 0
+
+            or:
+
+                state: "on"
+                attributes:
+                    brightness: 128
+                    rgb_color: (255, 0, 0)
+                    color_temp_kelvin: 2700
+
+            May be None when the entity is first created.
+
+        new_state:
+            New state from Home Assistant.
+
+            Examples:
+
+                state: "off"
+
+            or:
+
+                state: "on"
+                attributes:
+                    brightness: 255
+                    rgb_color: (255, 255, 255)
+                    color_temp_kelvin: 4000
+
+            May be None when the entity is removed.
+
+        Intended behaviour
+        ------------------
+
+        Detect relevant changes on the configured light entity and update
+        the matching KNX state CommunicationObjects.
+
+        Examples:
+
+        - ON/OFF changed
+            -> update _switch_state_object
+
+        - Brightness changed
+            -> update _brightness_state_object
+
+        - Color temperature changed
+            -> update _color_temperature_state_object
+
+        - RGB color changed
+            -> update _rgb_state_object
+
+        The CommunicationObjects are responsible for:
+        - storing the value
+        - answering GroupValueRead requests
+        - transmitting KNX feedback telegrams
+
+        This function should only determine *what changed* and publish the
+        updated values to the appropriate CommunicationObjects.
+        """
+
+        # Entity created
+        if old_state is None and new_state is not None:
+            raise NotImplementedError
+
+        # Entity removed
+        if old_state is not None and new_state is None:
+            raise NotImplementedError
+
+        # Nothing useful to process
+        if old_state is None or new_state is None:
+            return
+
+        #
+        # Possible differences to detect:
+        #
+        # old_state.state != new_state.state
+        #     "off" -> "on"
+        #     "on"  -> "off"
+        #
+        # old_state.attributes["brightness"]
+        #     changed
+        #
+        # old_state.attributes["rgb_color"]
+        #     changed
+        #
+        # old_state.attributes["color_temp_kelvin"]
+        #     changed
+        #
+        # For each changed property:
+        #     update corresponding KNX state object
+        #
+
         raise NotImplementedError
+

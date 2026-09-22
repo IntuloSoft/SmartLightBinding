@@ -1,3 +1,4 @@
 xknx
 pytest
 pytest-asyncio
+homeassistant
